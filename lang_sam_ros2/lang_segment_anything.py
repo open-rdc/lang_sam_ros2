@@ -16,7 +16,7 @@ class LangSAMNode(Node):
     def __init__(self):
         super().__init__('lang_sam_node')
 
-        self.declare_parameter('sam_model', 'sam2.1_hiera_tiny')
+        self.declare_parameter('sam_model', 'sam2.1_hiera_small')
         self.declare_parameter('text_prompt', 'car. wheel.')
 
         self.sam_model = self.get_parameter('sam_model').get_parameter_value().string_value
@@ -60,10 +60,6 @@ class LangSAMNode(Node):
 
         self.get_logger().info(f"LangSAM推論時間: {elapsed_time:.3f}秒")
         # --- 推論時間計測ここまで ---
-
-        if not results or 'masks' not in results[0] or 'labels' not in results[0]:
-            self.get_logger().error("❌ マスクまたはラベルが見つかりませんでした。")
-            return
 
         masks = results[0]['masks']
         boxes = results[0]['boxes']

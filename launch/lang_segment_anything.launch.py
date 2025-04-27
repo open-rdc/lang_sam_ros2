@@ -8,12 +8,12 @@ def generate_launch_description():
         # パラメータをコマンドライン引数で受け取れるようにする
         DeclareLaunchArgument(
             'sam_model',
-            default_value='sam2.1_hiera_tiny',
+            default_value='sam2.1_hiera_small',
             description='SAM model type to use'
         ),
         DeclareLaunchArgument(
             'text_prompt',
-            default_value='white line. human.',
+            default_value='road. white line. human. red pylon. wall. car. castle. building. tree. road sign.',
             description='Text prompt for LangSAM'
         ),
 
