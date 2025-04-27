@@ -11,35 +11,39 @@ import time
 
 from lang_sam import LangSAM
 from lang_sam.utils import draw_image
-
 class LangSAMNode(Node):
     def __init__(self):
         super().__init__('lang_sam_node')
 
+        # --- パラメータ宣言 ---
         self.declare_parameter('sam_model', 'sam2.1_hiera_small')
         self.declare_parameter('text_prompt', 'car. wheel.')
 
+        # --- パラメータ取得 ---
         self.sam_model = self.get_parameter('sam_model').get_parameter_value().string_value
         self.text_prompt = self.get_parameter('text_prompt').get_parameter_value().string_value
 
+        self.get_logger().info(f"使用するSAMモデル: {self.sam_model}")
+        self.get_logger().info(f"使用するText Prompt: {self.text_prompt}")
+
+        # --- LangSAMセットアップ ---
         self.model = LangSAM(sam_type=self.sam_model)
-        self.get_logger().info(f"使用しているSAMモデル: {self.sam_model}")
         self.bridge = CvBridge()
 
+        # --- ROS2通信設定 ---
         self.image_sub = self.create_subscription(
             ROSImage,
             '/image',
             self.image_callback,
             10
         )
-
         self.mask_pub = self.create_publisher(
             ROSImage,
             '/image_mask',
             10
         )
 
-        self.get_logger().info(f"LangSAMNode 起動！ text_prompt: {self.text_prompt}")
+        self.get_logger().info("LangSAMNode 起動完了")
 
     def image_callback(self, msg):
         try:

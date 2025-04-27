@@ -1,34 +1,26 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
-from launch.actions import DeclareLaunchArgument
+from launch_ros.substitutions import FindPackageShare
+import os
 
 def generate_launch_description():
-    return LaunchDescription([
-        # パラメータをコマンドライン引数で受け取れるようにする
-        DeclareLaunchArgument(
-            'sam_model',
-            default_value='sam2.1_hiera_small',
-            description='SAM model type to use'
-        ),
-        DeclareLaunchArgument(
-            'text_prompt',
-            default_value='road. white line. human. red pylon. wall. car. castle. building. tree. road sign.',
-            description='Text prompt for LangSAM'
-        ),
+    config_file = os.path.join(
+        FindPackageShare('lang_sam_ros2').find('lang_sam_ros2'),
+        'config',
+        'config.yaml'
+    )
 
+    return LaunchDescription([
         Node(
             package='lang_sam_ros2',
             executable='lang_segment_anything',
-            name='lang_segment_anything',
+            name='lang_sam_node',
             output='screen',
-            parameters=[{
-                'sam_model': LaunchConfiguration('sam_model'),
-                'text_prompt': LaunchConfiguration('text_prompt'),
-            }],
+            parameters=[config_file],
             remappings=[
-                ('/image', '/zed/zed_node/rgb/image_rect_color'), # 入力変換
-                ('/image_mask', '/image_mask') # 出力変換
+                ('/image', '/zed/zed_node/rgb/image_rect_color'),
+                ('/image_mask', '/image_mask')
             ],
         ),
     ])

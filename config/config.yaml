@@ -1,0 +1,4 @@
+lang_sam_node:
+  ros__parameters:
+    sam_model: "sam2.1_hiera_small"
+    text_prompt: "road. white line. human. red pylon. wall. car. building. tree. mobility."
