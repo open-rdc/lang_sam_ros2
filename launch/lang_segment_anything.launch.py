@@ -19,7 +19,7 @@ def generate_launch_description():
             output='screen',
             parameters=[config_file],
             remappings=[
-                ('/image', '/zed/zed_node/rgb/image_rect_color'),
+                ('/image', '/zed_node/rgb/image_rect_color'),
                 ('/image_mask', '/image_mask')
             ],
         ),
