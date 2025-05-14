@@ -41,14 +41,14 @@ class LangSAMNode(Node):
         # -------------------------------
         self.image_sub = self.create_subscription(
             ROSImage,
-            '/image',              # 入力画像トピック
+            '/image',
             self.image_callback,
             10
         )
 
         self.mask_pub = self.create_publisher(
             ROSImage,
-            '/image_mask',         # セグメンテーション結果トピック
+            '/image_mask',
             10
         )
 
@@ -57,20 +57,18 @@ class LangSAMNode(Node):
     def image_callback(self, msg):
         try:
             # -------------------------------
-            # 受信画像をNumPy形式に変換
+            # ROS Image → OpenCV画像（RGB）
             # -------------------------------
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-            cv_image = np.asarray(cv_image)
-
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
             if cv_image is None or cv_image.size == 0:
                 self.get_logger().warn("受信画像が空です")
                 return
 
-            # uint8型かつ書き込み可能な形式に明示的に変換（Jetson環境の警告対策）
+            # 書き込み可能な形式へ変換
             cv_image = cv_image.astype(np.uint8, copy=True)
 
-            # RGBA画像 → RGB → PIL形式に変換
-            image_pil = Image.fromarray(cv_image, mode='RGBA').convert('RGB')
+            # OpenCV (RGB) → PIL (RGB)
+            image_pil = Image.fromarray(cv_image, mode='RGB')
 
             # -------------------------------
             # LangSAM 推論実行
@@ -86,10 +84,10 @@ class LangSAMNode(Node):
 
         try:
             # -------------------------------
-            # セグメンテーション結果を描画
+            # 結果描画（OpenCVのRGB画像として渡す）
             # -------------------------------
             annotated_image = draw_image(
-                image_rgb=np.array(image_pil, copy=True),
+                image_rgb=cv_image, 
                 masks=np.array(results[0]['masks']),
                 xyxy=np.array(results[0]['boxes']),
                 probs=np.array(results[0]['scores']),
