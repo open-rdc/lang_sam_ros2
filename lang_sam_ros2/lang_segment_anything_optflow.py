@@ -112,22 +112,23 @@ class LangSAMNode(Node):
                 map_x = (map_x + flow[..., 0]).astype(np.float32)
                 map_y = (map_y + flow[..., 1]).astype(np.float32)
 
-                # マスクの位置を現在フレームに合わせてワープ
                 warped_masks = np.array([
                     cv2.remap(mask.astype(np.uint8), map_x, map_y, interpolation=cv2.INTER_NEAREST)
                     for mask in self.prev_masks
                 ]).astype(bool)
 
-                # 補間したマスクを元に描画
-                annotated_image = draw_image(
-                    image_rgb=cv_image,
-                    masks=warped_masks,
-                    xyxy=self.prev_boxes,
-                    probs=self.prev_scores,
-                    labels=self.prev_labels
-                )
+                if warped_masks.shape[0] > 0 and warped_masks.ndim == 3:
+                    annotated_image = draw_image(
+                        image_rgb=cv_image,
+                        masks=warped_masks,
+                        xyxy=self.prev_boxes,
+                        probs=self.prev_scores,
+                        labels=self.prev_labels
+                    )
+                else:
+                    self.get_logger().warn("補間マスクが空のため、描画をスキップします")
+                    annotated_image = cv_image.copy()
             else:
-                # 初回などで前データがない場合は元画像を使用
                 annotated_image = cv_image.copy()
 
         # =====================================
