@@ -50,6 +50,9 @@ class LangSAMNode(Node):
         self.mask_pub = self.create_publisher(
             ROSImage, '/image_mask', 10
         )
+        self.flow_pub = self.create_publisher(
+            ROSImage, '/flow_debug', 10
+        )
 
         # =====================================
         # 前フレームの情報保持（補間用）
@@ -102,9 +105,16 @@ class LangSAMNode(Node):
                 curr_gray = cv2.cvtColor(cv_image, cv2.COLOR_RGB2GRAY)
 
                 flow = cv2.calcOpticalFlowFarneback(
-                    prev_gray, curr_gray, None,
-                    pyr_scale=0.5, levels=3, winsize=15,
-                    iterations=3, poly_n=5, poly_sigma=1.2, flags=0
+                    prev_gray,       # 1フレーム前のグレースケール画像
+                    curr_gray,       # 現在のグレースケール画像
+                    None,            # 出力初期値（通常None）
+                    pyr_scale=0.5,   # ピラミッドスケール：下層画像サイズの縮小率
+                    levels=4,        # ピラミッドのレベル数（解像度の段階）
+                    winsize=25,      # 各ピクセル周辺の計算ウィンドウサイズ
+                    iterations=5,    # 各レベルでの繰り返し回数
+                    poly_n=7,        # 多項式展開に使う近傍のサイズ
+                    poly_sigma=1.5,  # 多項式展開のガウシアンσ
+                    flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN          # オプション（通常は0）
                 )
 
                 h, w = flow.shape[:2]
@@ -128,6 +138,17 @@ class LangSAMNode(Node):
                 else:
                     self.get_logger().warn("補間マスクが空のため、描画をスキップします")
                     annotated_image = cv_image.copy()
+                
+                # =====================================
+                # オプティカルフローのデバック用
+                # =====================================
+                flow_vis = draw_optical_flow(cv_image, flow)            
+                try:
+                    flow_msg = self.bridge.cv2_to_imgmsg(flow_vis, encoding='rgb8')
+                    self.flow_pub.publish(flow_msg)
+                except Exception as e:
+                    self.get_logger().error(f"フロー描画画像のパブリッシュ失敗: {e}")
+
             else:
                 annotated_image = cv_image.copy()
 
@@ -137,6 +158,7 @@ class LangSAMNode(Node):
         try:
             mask_msg = self.bridge.cv2_to_imgmsg(annotated_image, encoding='rgb8')
             self.mask_pub.publish(mask_msg)
+
         except Exception as e:
             self.get_logger().error(f"マスク画像のパブリッシュ失敗: {e}")
 
@@ -169,6 +191,35 @@ class LangSAMNode(Node):
             self.get_logger().error(f"LangSAM推論エラー: {e}")
         finally:
             self.predicting = False
+
+
+def draw_optical_flow(image, flow, step=16):
+    """
+    オプティカルフローベクトルを画像上に矢印で描画する
+
+    Args:
+        image: ベースとなるRGB画像 (OpenCV形式, shape=(H, W, 3))
+        flow: オプティカルフロー結果 (shape=(H, W, 2), dtype=float32)
+        step: 描画する間隔（粗さ）ピクセル単位
+    Returns:
+        flow_vis: 矢印を描画した画像
+    """
+    flow_vis = image.copy()
+
+    h, w = flow.shape[:2]
+    for y in range(0, h, step):
+        for x in range(0, w, step):
+            dx, dy = flow[y, x]
+            end_x = int(x + dx)
+            end_y = int(y + dy)
+            cv2.arrowedLine(
+                flow_vis,
+                (x, y), (end_x, end_y),
+                color=(0, 255, 0),  # 緑
+                thickness=1,
+                tipLength=0.3       # 矢印の先端の長さ
+            )
+    return flow_vis
 
 
 def main(args=None):
