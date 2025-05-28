@@ -62,6 +62,7 @@ class LangSAMNode(Node):
         self.prev_labels = None
         self.prev_boxes = None
         self.prev_scores = None
+        self.reset_required = True  # 初回は必ずLangSAMを使う
 
         self.get_logger().info("LangSAMNode（マスク補間あり）起動完了")
 
@@ -88,67 +89,128 @@ class LangSAMNode(Node):
         # =====================================
         # LangSAM 推論を非同期で実行
         # =====================================
-        if not self.predicting:
-            self.predicting = True
-            self.thread_pool.submit(
-                self.run_inference,
-                image_pil,
-                cv_image.copy()
-            )
+        with self.lock:
+            if not self.predicting:
+                self.predicting = True            
+                self.thread_pool.submit(
+                    self.run_inference,
+                    image_pil,
+                    cv_image.copy()
+                )
 
         # =====================================
-        # オプティカルフローによるマスク補間
+        # オプティカルフローによるマスクとバウンディングボックスの補間
         # =====================================
         with self.lock:
             if self.prev_image is not None and self.prev_masks is not None:
+                # 前フレームと現在フレームをグレースケールに変換
                 prev_gray = cv2.cvtColor(self.prev_image, cv2.COLOR_RGB2GRAY)
                 curr_gray = cv2.cvtColor(cv_image, cv2.COLOR_RGB2GRAY)
 
-                flow = cv2.calcOpticalFlowFarneback(
-                    prev_gray,       # 1フレーム前のグレースケール画像
-                    curr_gray,       # 現在のグレースケール画像
-                    None,            # 出力初期値（通常None）
-                    pyr_scale=0.5,   # ピラミッドスケール：下層画像サイズの縮小率
-                    levels=4,        # ピラミッドのレベル数（解像度の段階）
-                    winsize=25,      # 各ピクセル周辺の計算ウィンドウサイズ
-                    iterations=5,    # 各レベルでの繰り返し回数
-                    poly_n=7,        # 多項式展開に使う近傍のサイズ
-                    poly_sigma=1.5,  # 多項式展開のガウシアンσ
-                    flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN          # オプション（通常は0）
-                )
+                flow_vis = cv_image.copy()  # 光フロー可視化用の画像
 
-                h, w = flow.shape[:2]
-                map_x, map_y = np.meshgrid(np.arange(w), np.arange(h))
-                map_x = (map_x + flow[..., 0]).astype(np.float32)
-                map_y = (map_y + flow[..., 1]).astype(np.float32)
+                updated_masks = []
+                updated_boxes = []
 
-                warped_masks = np.array([
-                    cv2.remap(mask.astype(np.uint8), map_x, map_y, interpolation=cv2.INTER_NEAREST)
-                    for mask in self.prev_masks
-                ]).astype(bool)
+                # 各マスクと対応するバウンディングボックスに対して処理
+                for i, (mask, box) in enumerate(zip(self.prev_masks, self.prev_boxes)):
+                    # マスクをuint8に変換（特徴点抽出やワーピング用）
+                    mask_uint8 = (mask.astype(np.uint8)) * 255
 
-                if warped_masks.shape[0] > 0 and warped_masks.ndim == 3:
-                    annotated_image = draw_image(
-                        image_rgb=cv_image,
-                        masks=warped_masks,
-                        xyxy=self.prev_boxes,
-                        probs=self.prev_scores,
-                        labels=self.prev_labels
+                    # マスク内の特徴点を検出
+                    prev_pts = cv2.goodFeaturesToTrack(
+                        prev_gray,
+                        mask=mask_uint8,
+                        maxCorners=200,
+                        qualityLevel=0.03,
+                        minDistance=5
                     )
-                else:
-                    self.get_logger().warn("補間マスクが空のため、描画をスキップします")
-                    annotated_image = cv_image.copy()
-                
-                # =====================================
-                # オプティカルフローのデバック用
-                # =====================================
-                flow_vis = draw_optical_flow(cv_image, flow)            
+
+                    # 特徴点が検出できなければマスクとボックスはそのまま
+                    if prev_pts is None or len(prev_pts) < 3:
+                        updated_masks.append(mask)
+                        updated_boxes.append(box)
+                        continue
+
+                    prev_masked = cv2.bitwise_and(prev_gray, prev_gray, mask=mask_uint8)
+                    curr_masked = cv2.bitwise_and(curr_gray, curr_gray, mask=mask_uint8)
+
+                    # Lucas-Kanade法で現在フレーム上の対応点を追跡
+                    next_pts, status, _ = cv2.calcOpticalFlowPyrLK(prev_masked, curr_masked, prev_pts, None)
+
+                    # 有効な追跡点のみ抽出
+                    prev_valid = prev_pts[status.flatten() == 1]
+                    next_valid = next_pts[status.flatten() == 1]
+
+                    if len(prev_valid) < 3:
+                        updated_masks.append(mask)
+                        updated_boxes.append(box)
+                        continue
+
+                    # アフィン変換を推定（RANSACで外れ値除去）
+                    M, inliers = cv2.estimateAffinePartial2D(prev_valid, next_valid, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+
+                    if M is not None:
+                        # マスクをアフィン変換
+                        warped_mask = cv2.warpAffine(
+                            mask_uint8,
+                            M,
+                            (cv_image.shape[1], cv_image.shape[0]),
+                            flags=cv2.INTER_NEAREST,
+                            borderMode=cv2.BORDER_CONSTANT,
+                            borderValue=0
+                        )
+                        warped_mask_bool = warped_mask > 0  # bool型に戻す
+                        updated_masks.append(warped_mask_bool)
+
+                        # バウンディングボックスもアフィン変換
+                        x1, y1, x2, y2 = box
+                        corners = np.array([[x1, y1], [x2, y2]], dtype=np.float32).reshape(-1, 1, 2)
+                        transformed = cv2.transform(corners, M)
+                        x1_new, y1_new = transformed[0][0]
+                        x2_new, y2_new = transformed[1][0]
+                        updated_boxes.append([x1_new, y1_new, x2_new, y2_new])
+                    else:
+                        # アフィン変換に失敗した場合はそのまま
+                        updated_masks.append(mask)
+                        updated_boxes.append(box)
+
+                    # 可視化用：特徴点の動きを矢印で描画
+                    for old, new, st in zip(prev_pts, next_pts, status):
+                        if st:
+                            x_old, y_old = old.ravel()
+                            x_new, y_new = new.ravel()
+                            cv2.arrowedLine(
+                                flow_vis,
+                                (int(x_old), int(y_old)),
+                                (int(x_new), int(y_new)),
+                                color=(0, 255, 0),
+                                thickness=1,
+                                tipLength=0.3
+                            )
+
+                # flow_vis パブリッシュ
                 try:
                     flow_msg = self.bridge.cv2_to_imgmsg(flow_vis, encoding='rgb8')
                     self.flow_pub.publish(flow_msg)
                 except Exception as e:
                     self.get_logger().error(f"フロー描画画像のパブリッシュ失敗: {e}")
 
+                # 更新されたマスクで描画
+                masks_np = np.array(updated_masks)
+                if len(updated_boxes) == 0:
+                    updated_boxes = np.zeros((0, 4), dtype=np.float32)  # safety fallback
+
+                annotated_image = draw_image(
+                    image_rgb=cv_image,
+                    masks=masks_np,
+                    xyxy=np.array(updated_boxes),
+                    probs=self.prev_scores,
+                    labels=self.prev_labels
+                )
+                # 更新マスクを保存して次に使う
+                self.prev_masks = masks_np
+                self.prev_boxes = np.array(updated_boxes)
             else:
                 annotated_image = cv_image.copy()
 
@@ -164,17 +226,11 @@ class LangSAMNode(Node):
 
     def run_inference(self, image_pil, image_np):
         try:
-            # =====================================
-            # LangSAMによるマスク推論の実行
-            # =====================================
             start = time.time()
             results = self.model.predict([image_pil], [self.text_prompt])
             elapsed = time.time() - start
             # self.get_logger().info(f"LangSAM 推論完了: {elapsed:.2f}秒")
 
-            # =====================================
-            # 推論結果の取得と保存（補間用）
-            # =====================================
             masks = np.array(results[0]['masks'])
             boxes = np.array(results[0]['boxes'])
             scores = np.array(results[0]['scores'])
@@ -182,44 +238,19 @@ class LangSAMNode(Node):
 
             with self.lock:
                 self.prev_image = image_np.copy()
-                self.prev_masks = masks.copy()
-                self.prev_boxes = boxes.copy()
-                self.prev_scores = scores.copy()
-                self.prev_labels = labels.copy()
+
+                # ❗LangSAMの結果を使うのは初回かリセット時のみ
+                if self.reset_required:
+                    self.prev_masks = masks.copy()
+                    self.prev_boxes = boxes.copy()
+                    self.prev_scores = scores.copy()
+                    self.prev_labels = labels.copy()
+                    self.reset_required = False
 
         except Exception as e:
             self.get_logger().error(f"LangSAM推論エラー: {e}")
         finally:
             self.predicting = False
-
-
-def draw_optical_flow(image, flow, step=16):
-    """
-    オプティカルフローベクトルを画像上に矢印で描画する
-
-    Args:
-        image: ベースとなるRGB画像 (OpenCV形式, shape=(H, W, 3))
-        flow: オプティカルフロー結果 (shape=(H, W, 2), dtype=float32)
-        step: 描画する間隔（粗さ）ピクセル単位
-    Returns:
-        flow_vis: 矢印を描画した画像
-    """
-    flow_vis = image.copy()
-
-    h, w = flow.shape[:2]
-    for y in range(0, h, step):
-        for x in range(0, w, step):
-            dx, dy = flow[y, x]
-            end_x = int(x + dx)
-            end_y = int(y + dy)
-            cv2.arrowedLine(
-                flow_vis,
-                (x, y), (end_x, end_y),
-                color=(0, 255, 0),  # 緑
-                thickness=1,
-                tipLength=0.3       # 矢印の先端の長さ
-            )
-    return flow_vis
 
 
 def main(args=None):
