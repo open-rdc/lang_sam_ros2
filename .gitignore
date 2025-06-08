@@ -1,5 +1,5 @@
 # Custom
-config/config.yaml
+config/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
