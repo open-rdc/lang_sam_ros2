@@ -5,23 +5,44 @@ from launch_ros.substitutions import FindPackageShare
 import os
 
 def generate_launch_description():
+    # パッケージ内のconfig.yamlファイルのパスを取得
     config_file = os.path.join(
         FindPackageShare('lang_sam_ros2').find('lang_sam_ros2'),
         'config',
         'config.yaml'
     )
 
+    # ノードの定義とLaunchDescriptionの返却
     return LaunchDescription([
+        # Node(
+        #     package='lang_sam_ros2',
+        #     executable='main',
+        #     name='lang_sam_node',
+        #     output='screen',
+        #     parameters=[config_file],
+        #     remappings=[
+        #         ('/image', '/zed/zed_node/rgb/image_rect_color'),
+        #         ('/image_mask', '/image_mask'),
+        #         ('/image_opt_mask', '/image_opt_mask'),
+        #     ],
+        # ),
         Node(
             package='lang_sam_ros2',
-            # executable='lang_segment_anything',
-            executable='lang_segment_anything_optflow',
-            name='lang_sam_node',
+            executable='main',
+            name='lang_sam_mask_node',
             output='screen',
             parameters=[config_file],
             remappings=[
-                ('/image', '/zed_node/rgb/image_rect_color'),
-                ('/image_mask', '/image_mask')
+                ('/image', '/zed/zed_node/rgb/image_rect_color'),
+                ('/image_mask', '/image_mask'),
+                ('/image_opt_mask', '/image_opt_mask'),
             ],
         ),
+        Node(
+            package='lang_sam_ros2',
+            executable='main',
+            name='optflow_mask_node',
+            output='screen',
+            parameters=[config_file],
+        )
     ])

@@ -27,8 +27,7 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
-            'lang_segment_anything = lang_sam_ros2.lang_segment_anything:main',
-            'lang_segment_anything_optflow = lang_sam_ros2.lang_segment_anything_optflow:main',
+            'main = lang_sam_ros2.main:main',
         ],
     },
 )
