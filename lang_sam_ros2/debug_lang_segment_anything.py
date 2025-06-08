@@ -21,11 +21,8 @@ class LangSAMNode(Node):
         # ========================================
         # パラメータの宣言と取得
         # ========================================
-        self.declare_parameter('sam_model', 'sam2.1_hiera_small')
-        self.declare_parameter('text_prompt', 'car. wheel.')
-
-        self.sam_model = self.get_parameter('sam_model').get_parameter_value().string_value
-        self.text_prompt = self.get_parameter('text_prompt').get_parameter_value().string_value
+        self.sam_model = self.declare_and_get_parameter('sam_model', 'sam2.1_hiera_small')
+        self.text_prompt = self.declare_and_get_parameter('text_prompt', 'car. wheel.')
 
         self.get_logger().info(f"使用するSAMモデル: {self.sam_model}")
         self.get_logger().info(f"使用するText Prompt: {self.text_prompt}")
@@ -47,24 +44,43 @@ class LangSAMNode(Node):
         # ROS2 通信の設定（購読・配信）
         # ========================================
         self.image_sub = self.create_subscription(
-            ROSImage,
-            '/image',
-            self.image_callback, 
-            10
-        )
+            ROSImage, '/image', self.image_callback, 10)
 
         self.mask_pub = self.create_publisher(
-            ROSImage,
-            '/image_mask',
-            10
-        )
+            ROSImage, '/image_sam', 10)
 
         self.get_logger().info("LangSAMNode 起動完了")
 
+    def declare_and_get_parameter(self, name, default_value):
+        """パラメータを宣言して取得するユーティリティ関数"""
+        self.declare_parameter(name, default_value)
+        return self.get_parameter(name).get_parameter_value().string_value
+
     def image_callback(self, msg):
-        # ========================================
-        # FPS計測
-        # ========================================
+        self.update_fps()
+
+        try:
+            # ROS画像メッセージ → OpenCV画像 (RGB)
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
+            if cv_image is None or cv_image.size == 0:
+                self.get_logger().warn("受信画像が空です")
+                return
+            cv_image = cv_image.astype(np.uint8, copy=True)
+
+            # OpenCV → PIL形式へ変換
+            image_pil = Image.fromarray(cv_image, mode='RGB')
+
+            # セグメンテーション推論
+            results = self.model.predict([image_pil], [self.text_prompt])
+
+            # 結果描画および送信
+            self.publish_annotated_image(cv_image, results)
+
+        except Exception as e:
+            self.get_logger().error(f"画像処理エラー: {repr(e)}")
+
+    def update_fps(self):
+        """FPSを1秒ごとに更新"""
         self.frame_count += 1
         now = time.time()
         elapsed = now - self.last_time
@@ -73,32 +89,9 @@ class LangSAMNode(Node):
             self.frame_count = 0
             self.last_time = now
 
+    def publish_annotated_image(self, cv_image, results):
+        """推論結果を描画して配信"""
         try:
-            # ========================================
-            # ROS画像メッセージ → OpenCV画像
-            # ========================================
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
-            if cv_image is None or cv_image.size == 0:
-                self.get_logger().warn("受信画像が空です")
-                return
-            cv_image = cv_image.astype(np.uint8, copy=True)
-
-            # OpenCV (RGB) → PIL (RGB)
-            image_pil = Image.fromarray(cv_image, mode='RGB')
-
-            # ========================================
-            # LangSAMによるセグメンテーション推論
-            # ========================================
-            results = self.model.predict([image_pil], [self.text_prompt])
-
-        except Exception as e:
-            self.get_logger().error(f"LangSAM推論エラー: {e}")
-            return
-
-        try:
-            # ========================================
-            # セグメンテーション結果の描画
-            # ========================================
             annotated_image = draw_image(
                 image_rgb=cv_image,
                 masks=np.array(results[0]['masks']),
@@ -107,7 +100,7 @@ class LangSAMNode(Node):
                 labels=results[0]['labels']
             )
 
-            # FPSを画像に描画
+            # FPS情報を画像に描画
             cv2.putText(
                 annotated_image,
                 f"FPS: {self.fps:.2f}",
@@ -119,9 +112,23 @@ class LangSAMNode(Node):
                 cv2.LINE_AA
             )
 
-            # OpenCV画像 → ROS画像メッセージ → 配信
+            # OpenCV → ROSメッセージ変換および送信
             mask_msg = self.bridge.cv2_to_imgmsg(annotated_image, encoding='rgb8')
             self.mask_pub.publish(mask_msg)
 
         except Exception as e:
-            self.get_logger().error(f"マスク描画・送信エラー: {e}")
+            self.get_logger().error(f"マスク描画・送信エラー: {repr(e)}")
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = LangSAMNode()
+
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+
+    try:
+        executor.spin()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

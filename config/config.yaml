@@ -3,14 +3,9 @@ lang_sam_node:
     sam_model: "sam2.1_hiera_small"
     text_prompt: "white line. human. red pylon. wall. car. building. mobility."
 
-lang_sam_mask_node:
+optflow_node:
   ros__parameters:
-    sam_model: "sam2.1_hiera_small"
-    text_prompt: "white line. human. red pylon. wall. car. building. mobility."
-
-optflow_mask_node:
-  ros__parameters:
-    reset_interval: 60
+    reset_interval: 50
     grid_size_x: 10
     grid_size_y: 8
     max_per_cell: 40

@@ -23,11 +23,12 @@ setup(
     zip_safe=True,
     maintainer='Ryusei Baba',
     maintainer_email='babaryusei.kw@gmail.com',
-    description='LangSAMを使ってROS2でマスク生成するノード',
+    description='LangSAMを使ってROS 2でマスク生成するノード',
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
             'main = lang_sam_ros2.main:main',
+            'debug_lang_sam_node = lang_sam_ros2.debug_lang_segment_anything:main',
         ],
     },
 )

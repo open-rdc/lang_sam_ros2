@@ -12,37 +12,28 @@ def generate_launch_description():
         'config.yaml'
     )
 
-    # ノードの定義とLaunchDescriptionの返却
+    # ノードの定義とLaunchDescriptionの生成
     return LaunchDescription([
         # Node(
         #     package='lang_sam_ros2',
-        #     executable='main',
+        #     executable='debug_lang_sam_node', # デバッグ用のノード
         #     name='lang_sam_node',
         #     output='screen',
         #     parameters=[config_file],
         #     remappings=[
         #         ('/image', '/zed/zed_node/rgb/image_rect_color'),
-        #         ('/image_mask', '/image_mask'),
-        #         ('/image_opt_mask', '/image_opt_mask'),
+        #         ('/image_sam', '/image_sam'),
         #     ],
         # ),
         Node(
             package='lang_sam_ros2',
-            executable='main',
-            name='lang_sam_mask_node',
+            executable='main',  # メインのLangSAMノード
             output='screen',
             parameters=[config_file],
             remappings=[
                 ('/image', '/zed/zed_node/rgb/image_rect_color'),
-                ('/image_mask', '/image_mask'),
-                ('/image_opt_mask', '/image_opt_mask'),
+                ('/image_sam', '/image_sam'),
+                ('/image_optflow', '/image_optflow'),
             ],
         ),
-        Node(
-            package='lang_sam_ros2',
-            executable='main',
-            name='optflow_mask_node',
-            output='screen',
-            parameters=[config_file],
-        )
     ])
