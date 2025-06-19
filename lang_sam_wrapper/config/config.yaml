@@ -1,0 +1,34 @@
+lang_sam_node:
+  ros__parameters:
+    sam_model: "sam2.1_hiera_small"
+    text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."
+
+optflow_node:
+  ros__parameters:
+    # Tracking reset parameters
+    reset_interval: 3 
+    
+    # Tracking target parameters
+    tracking_targets: "white line. human. red pylon. car. mobility." # "" → 全てのオブジェクトをトラッキング
+    
+    # Grid sampling parameters
+    grid_size_x: 5 
+    grid_size_y: 4
+    max_per_cell: 40
+    
+    # Feature detection parameters
+    quality_level: 0.001
+    min_distance: 1
+    block_size: 3
+    
+    # Tracking visualization parameters
+    tracking_circle_radius: 4
+    tracking_circle_color: 255
+    
+    # Optical flow parameters
+    optical_flow_win_size_x: 15
+    optical_flow_win_size_y: 15
+    optical_flow_max_level: 2
+    optical_flow_criteria_eps: 0.03
+    optical_flow_criteria_max_count: 10
+
