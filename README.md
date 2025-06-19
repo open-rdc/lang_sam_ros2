@@ -2,10 +2,6 @@
 
 本パッケージは，**Language Segment-Anything** を ROS 2 で使用できるようにしたものです．
 
-<div align="center">
-  <img src="./doc/lang_sam_ros2.gif" alt="LangSAM ROS2 全体構成" height="240" style="margin: 10px 0;">
-</div>
-
 ---
 #### 概要
 **Language Segment-Anything** と **オプティカルフロー処理** を統合することで， 
@@ -20,8 +16,8 @@
       <td><img src="./doc/optical_flow.gif" alt="Optical Flow 出力" height="200"></td>
     </tr>
     <tr>
-      <td align="center"><b>LangSAM 出力</b></td>
-      <td align="center"><b>オプティカルフローによる追跡</b></td>
+      <td align="center"><b>LangSAM 出力<br>text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."</b></td>
+      <td align="center"><b>オプティカルフローによる追跡<br>tracking_targets: "white line. human. red pylon. car. mobility."</b></td>
     </tr>
   </table>
 </div>
@@ -44,7 +40,7 @@ source install/setup.bash
 ---
 #### 起動
 ```
-ros2 launch lang_sam_ros2 lang_segment_anything.launch.py
+ros2 launch lang_sam_wrapper lang_segment_anything.launch.py
 ```
 ---
 #### License
