@@ -1,34 +1,36 @@
 lang_sam_node:
   ros__parameters:
+    # SAMモデルの種類を指定
     sam_model: "sam2.1_hiera_small"
+    # セグメンテーション対象のテキストプロンプト
     text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."
 
 optflow_node:
   ros__parameters:
-    # Tracking reset parameters
+    # トラッキングのリセット間隔（秒）
     reset_interval: 3 
     
-    # Tracking target parameters
+    # トラッキング対象の設定
     tracking_targets: "white line. human. red pylon. car. mobility." # "" → 全てのオブジェクトをトラッキング
     
-    # Grid sampling parameters
-    grid_size_x: 5 
-    grid_size_y: 4
-    max_per_cell: 40
+    # グリッド設定
+    grid_size_x: 10
+    grid_size_y: 8 
+    max_per_cell: 80 # 1セルあたりの最大トラッキング数
     
-    # Feature detection parameters
-    quality_level: 0.001
-    min_distance: 1
-    block_size: 3
+    # トラッキングパラメータ
+    quality_level: 0.001 # 特徴点検出の品質レベル
+    min_distance: 1 # 特徴点間の最小距離
+    block_size: 3 # 特徴点検出のブロックサイズ
     
-    # Tracking visualization parameters
-    tracking_circle_radius: 4
-    tracking_circle_color: 255
+    # トラッキング可視化パラメータ
+    tracking_circle_radius: 4 # トラッキング円の半径
+    tracking_circle_color: 255 # トラッキング円の色
     
-    # Optical flow parameters
-    optical_flow_win_size_x: 15
-    optical_flow_win_size_y: 15
-    optical_flow_max_level: 2
-    optical_flow_criteria_eps: 0.03
-    optical_flow_criteria_max_count: 10
+    # オプティカルフローパラメータ  
+    optical_flow_win_size_x: 15 # オプティカルフローウィンドウサイズX
+    optical_flow_win_size_y: 15 # オプティカルフローウィンドウサイズY  
+    optical_flow_max_level: 2 # ピラミッドの最大レベル
+    optical_flow_criteria_eps: 0.03 # 収束判定のイプシロン値
+    optical_flow_criteria_max_count: 10 # 最大反復回数
 
