@@ -1,5 +1,7 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from sensor_msgs.msg import Image as ROSImage
 from cv_bridge import CvBridge
 import cv2
@@ -7,23 +9,13 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 from lang_sam_msgs.msg import SamMasks
 from lang_sam.utils import draw_image
+from lang_sam import LangSAM
+from PIL import Image
+import os
+import torch
+import warnings
+import threading
 
-
-# Default constants (used as fallbacks if config is not available)
-DEFAULT_RESET_INTERVAL = 60
-DEFAULT_GRID_SIZE_Y = 8
-DEFAULT_GRID_SIZE_X = 10
-DEFAULT_MAX_PER_CELL = 20
-DEFAULT_QUALITY_LEVEL = 0.001
-DEFAULT_MIN_DISTANCE = 1
-DEFAULT_BLOCK_SIZE = 3
-DEFAULT_TRACKING_CIRCLE_RADIUS = 4
-DEFAULT_TRACKING_CIRCLE_COLOR = 255
-DEFAULT_OPTICAL_FLOW_WIN_SIZE_X = 15
-DEFAULT_OPTICAL_FLOW_WIN_SIZE_Y = 15
-DEFAULT_OPTICAL_FLOW_MAX_LEVEL = 2
-DEFAULT_OPTICAL_FLOW_CRITERIA_EPS = 0.03
-DEFAULT_OPTICAL_FLOW_CRITERIA_MAX_COUNT = 10
 
 
 def sample_features_grid(
@@ -31,9 +23,9 @@ def sample_features_grid(
     mask: np.ndarray, 
     grid_size: Tuple[int, int] = (10, 8), 
     max_per_cell: int = 40,
-    quality_level: float = DEFAULT_QUALITY_LEVEL,
-    min_distance: int = DEFAULT_MIN_DISTANCE,
-    block_size: int = DEFAULT_BLOCK_SIZE
+    quality_level: float = 0.001,
+    min_distance: int = 1,
+    block_size: int = 3
 ) -> Optional[np.ndarray]:
     """グリッドごとに特徴点を抽出する関数
     
@@ -77,14 +69,18 @@ def sample_features_grid(
 
 
 class OptFlowNode(Node):
-    """Optical Flow処理を行うROSノード
+    """LangSAM + Optical Flow処理を行うROSノード
     
-    SAMマスクを受信して、オプティカルフローによる物体トラッキングを実行し、
+    テキストプロンプトでセグメンテーションを実行し、
+    オプティカルフローによる物体トラッキングを実行し、
     結果を描画して配信する。
     """
     
     def __init__(self):
         super().__init__('optflow_node')
+        
+        # コールバックグループの設定
+        self._init_callback_groups()
         
         # パラメータの初期化
         self._init_parameters()
@@ -95,12 +91,27 @@ class OptFlowNode(Node):
         # ROS通信の設定
         self._init_ros_communication()
         
-        self.get_logger().info("Optical Flow Mask Node 起動完了")
+        self.get_logger().info("LangSAM + Optical Flow Node 起動完了")
+        self.get_logger().info(f"使用するSAMモデル: {self.sam_model}")
+        self.get_logger().info(f"使用するText Prompt: {self.text_prompt}")
+    
+    def _init_callback_groups(self) -> None:
+        """コールバックグループの初期化"""
+        # 画像処理用のコールバックグループ（排他的）
+        self.image_callback_group = MutuallyExclusiveCallbackGroup()
+        # パブリッシャー用のコールバックグループ（再帰可能）
+        self.publisher_callback_group = ReentrantCallbackGroup()
+        # スレッドセーフ用のロック
+        self.processing_lock = threading.Lock()
     
     def _init_parameters(self) -> None:
         """パラメータの宣言と取得"""
+        # LangSAM parameters
+        self.sam_model = self.declare_and_get_param('sam_model', 'sam2.1_hiera_small')
+        self.text_prompt = self.declare_and_get_param('text_prompt', 'car. wheel.')
+        
         # Tracking reset parameters
-        self.reset_interval = self.declare_and_get_param('reset_interval', DEFAULT_RESET_INTERVAL)
+        self.reset_interval = self.declare_and_get_param('reset_interval', 60)
         
         # Tracking target parameters
         tracking_targets_str = self.declare_and_get_param('tracking_targets', "")
@@ -108,28 +119,29 @@ class OptFlowNode(Node):
         
         # Grid sampling parameters
         self.grid_size = (
-            self.declare_and_get_param('grid_size_y', DEFAULT_GRID_SIZE_Y),
-            self.declare_and_get_param('grid_size_x', DEFAULT_GRID_SIZE_X)
+            self.declare_and_get_param('grid_size_y', 8),
+            self.declare_and_get_param('grid_size_x', 10)
         )
-        self.max_per_cell = self.declare_and_get_param('max_per_cell', DEFAULT_MAX_PER_CELL)
+        self.max_per_cell = self.declare_and_get_param('max_per_cell', 20)
         
         # Feature detection parameters
-        self.quality_level = self.declare_and_get_param('quality_level', DEFAULT_QUALITY_LEVEL)
-        self.min_distance = self.declare_and_get_param('min_distance', DEFAULT_MIN_DISTANCE)
-        self.block_size = self.declare_and_get_param('block_size', DEFAULT_BLOCK_SIZE)
+        self.quality_level = self.declare_and_get_param('quality_level', 0.001)
+        self.min_distance = self.declare_and_get_param('min_distance', 1)
+        self.block_size = self.declare_and_get_param('block_size', 3)
         
         # Tracking visualization parameters
-        self.tracking_circle_radius = self.declare_and_get_param('tracking_circle_radius', DEFAULT_TRACKING_CIRCLE_RADIUS)
-        self.tracking_circle_color = self.declare_and_get_param('tracking_circle_color', DEFAULT_TRACKING_CIRCLE_COLOR)
+        self.tracking_circle_radius = self.declare_and_get_param('tracking_circle_radius', 4)
+        self.tracking_circle_color = self.declare_and_get_param('tracking_circle_color', 255)
+        
         
         # Optical flow parameters
         self.optical_flow_win_size = (
-            self.declare_and_get_param('optical_flow_win_size_x', DEFAULT_OPTICAL_FLOW_WIN_SIZE_X),
-            self.declare_and_get_param('optical_flow_win_size_y', DEFAULT_OPTICAL_FLOW_WIN_SIZE_Y)
+            self.declare_and_get_param('optical_flow_win_size_x', 15),
+            self.declare_and_get_param('optical_flow_win_size_y', 15)
         )
-        self.optical_flow_max_level = self.declare_and_get_param('optical_flow_max_level', DEFAULT_OPTICAL_FLOW_MAX_LEVEL)
-        self.optical_flow_criteria_eps = self.declare_and_get_param('optical_flow_criteria_eps', DEFAULT_OPTICAL_FLOW_CRITERIA_EPS)
-        self.optical_flow_criteria_max_count = self.declare_and_get_param('optical_flow_criteria_max_count', DEFAULT_OPTICAL_FLOW_CRITERIA_MAX_COUNT)
+        self.optical_flow_max_level = self.declare_and_get_param('optical_flow_max_level', 2)
+        self.optical_flow_criteria_eps = self.declare_and_get_param('optical_flow_criteria_eps', 0.03)
+        self.optical_flow_criteria_max_count = self.declare_and_get_param('optical_flow_criteria_max_count', 10)
         
         # Optical flow criteria object
         self.optical_flow_criteria = (
@@ -140,24 +152,48 @@ class OptFlowNode(Node):
     
     def _init_state(self) -> None:
         """内部状態の初期化"""
+        # CUDA設定とワーニング抑制
+        self._configure_cuda_environment()
+        
+        # LangSAM model initialization
+        try:
+            self.model = LangSAM(sam_type=self.sam_model)
+            self.get_logger().info("LangSAMモデルの初期化が完了しました")
+        except Exception as e:
+            self.get_logger().error(f"LangSAMモデルの初期化に失敗しました: {repr(e)}")
+            # フォールバック: モデルなしで動作
+            self.model = None
+            
         self.bridge = CvBridge()
         self.prev_gray: Optional[np.ndarray] = None
         self.prev_pts_per_label: Dict[str, np.ndarray] = {}
-        self.tracking_masks_per_label: Dict[str, np.ndarray] = {}
-        self.last_published_masks: Dict[str, np.ndarray] = {}  # 最後に表示したトラッキング結果を保持
         self.latest_sam_data: Optional[Dict] = None
         self.frame_count = 0
         self.sam_msg_count = 0  # SAMマスクメッセージの受信回数
+        self.sam_updated = False  # LangSAM推論が完了したフラグ
     
     def _init_ros_communication(self) -> None:
         """ROS通信の設定"""
+        # 画像サブスクライバー（専用コールバックグループ）
         self.image_sub = self.create_subscription(
-            ROSImage, '/image', self.image_callback, 10
+            ROSImage, '/image', self.image_callback, 10,
+            callback_group=self.image_callback_group
         )
-        self.mask_sub = self.create_subscription(
-            SamMasks, '/sam_masks', self.mask_callback, 10
+        # SAMマスクの配信（LangSAMの結果とトラッキング結果の両方）
+        self.sam_masks_pub = self.create_publisher(
+            SamMasks, '/sam_masks', 10,
+            callback_group=self.publisher_callback_group
         )
-        self.pub = self.create_publisher(ROSImage, '/image_optflow', 10)
+        # セグメンテーション結果画像の配信
+        self.sam_image_pub = self.create_publisher(
+            ROSImage, '/image_sam', 10,
+            callback_group=self.publisher_callback_group
+        )
+        # オプティカルフロー結果の配信
+        self.pub = self.create_publisher(
+            ROSImage, '/image_optflow', 10,
+            callback_group=self.publisher_callback_group
+        )
 
     def declare_and_get_param(self, name: str, default_value) -> any:
         """パラメータを宣言して取得するヘルパー関数
@@ -170,7 +206,10 @@ class OptFlowNode(Node):
             パラメータの値
         """
         self.declare_parameter(name, default_value)
-        return self.get_parameter(name).value
+        if isinstance(default_value, str):
+            return self.get_parameter(name).get_parameter_value().string_value
+        else:
+            return self.get_parameter(name).value
     
     def _parse_tracking_targets(self, targets_str: str) -> List[str]:
         """トラッキング対象文字列をパース
@@ -189,48 +228,18 @@ class OptFlowNode(Node):
         self.get_logger().info(f"トラッキング対象: {targets}")
         return targets
 
-    def mask_callback(self, msg: SamMasks) -> None:
-        """SAMマスクを受信して内部データを更新
-        
-        Args:
-            msg: SamMasksメッセージ
-        """
-        try:
-            if not msg.masks:
-                self.get_logger().warn("受信したSamMasksメッセージにマスクが含まれていません")
-                return
-                
-            self.latest_sam_data = {
-                'labels': msg.labels,
-                'masks': self._convert_mask_messages(msg.masks)
-            }
-            
-            # SAMマスクメッセージの受信回数をカウント
-            self.sam_msg_count += 1
-            
-        except Exception as e:
-            self.get_logger().error(f"mask_callback エラー: {repr(e)}")
-    
-    def _convert_mask_messages(self, mask_msgs: List) -> List[np.ndarray]:
-        """マスクメッセージをOpenCV形式に変換
-        
-        Args:
-            mask_msgs: マスクメッセージのリスト
-            
-        Returns:
-            OpenCV形式のマスクリスト
-        """
-        masks = []
-        for mask_msg in mask_msgs:
-            try:
-                mask_cv = self.bridge.imgmsg_to_cv2(mask_msg, desired_encoding='mono8')
-                masks.append(mask_cv)
-            except Exception as e:
-                self.get_logger().error(f"マスク変換エラー: {repr(e)}")
-        return masks
-
     def image_callback(self, msg: ROSImage) -> None:
-        """メイン画像処理：特徴点の初期化・追跡・マスク生成
+        """メイン画像処理：LangSAMセグメンテーション + 特徴点の初期化・追跡・マスク生成
+        
+        Args:
+            msg: 画像メッセージ
+        """
+        # スレッドセーフティのためのロック
+        with self.processing_lock:
+            self._process_image(msg)
+    
+    def _process_image(self, msg: ROSImage) -> None:
+        """画像処理の実際の処理（ロック内で実行）
         
         Args:
             msg: 画像メッセージ
@@ -240,24 +249,33 @@ class OptFlowNode(Node):
             if image_cv is None or image_cv.size == 0:
                 self.get_logger().warn("受信した画像が空です")
                 return
-                
+            
+            image_cv = image_cv.astype(np.uint8, copy=True)
             gray = cv2.cvtColor(image_cv, cv2.COLOR_RGB2GRAY)
+
+            # デバッグログ
+            if self.frame_count % 30 == 0:  # 30フレームごとにログ出力
+                self.get_logger().info(f"フレーム処理中: {self.frame_count}, 画像サイズ: {image_cv.shape}")
 
             is_reset = self._should_reset_tracking()
             if is_reset:
+                self.get_logger().info(f"トラッキングリセット実行 (フレーム: {self.frame_count})")
+                # LangSAMセグメンテーション実行
+                self._run_lang_sam_segmentation(image_cv)
+                # SAMの結果を使ってトラッキング初期化
                 self._reset_tracking_points(gray)
             else:
                 self._track_points(gray)
 
-            # トラッキング結果を表示
-            if not is_reset and self.tracking_masks_per_label:
-                # 通常時：現在のトラッキング結果を表示
-                self._publish_tracking_result(image_cv)
-                # 表示した結果を保存
-                self.last_published_masks = self.tracking_masks_per_label.copy()
-            elif is_reset and self.last_published_masks:
-                # リセット時：前回のトラッキング結果を表示
-                self._publish_last_tracking_result(image_cv)
+            # トラッキング結果を表示（draw_imageを使用）
+            published = False
+            if self.prev_pts_per_label:
+                self._publish_tracking_result_with_draw_image(image_cv)
+                published = True
+            
+            # デバッグログ
+            if self.frame_count % 30 == 0:
+                self.get_logger().info(f"結果配信: {published}, トラッキングラベル数: {len(self.prev_pts_per_label)}")
 
             self.frame_count += 1
 
@@ -270,10 +288,24 @@ class OptFlowNode(Node):
         Returns:
             初期化が必要な場合True
         """
-        return (
-            self.sam_msg_count % self.reset_interval == 0 or 
-            not self.prev_pts_per_label
+        # 初回またはトラッキング点がない場合は必ずリセット
+        force_reset = not self.prev_pts_per_label or self.frame_count == 0
+        
+        # LangSAMセグメンテーションを実行する条件（ただし、処理頻度を下げる）
+        should_run_sam = (
+            self.frame_count % self.reset_interval == 0 or 
+            self.frame_count == 0
         )
+        
+        # LangSAM推論が完了した場合は次のフレームでリセット
+        sam_ready_for_reset = self.sam_updated
+        
+        reset_needed = should_run_sam or force_reset or sam_ready_for_reset
+        
+        if reset_needed and self.frame_count % 30 == 0:
+            self.get_logger().info(f"リセット判定: frame={self.frame_count}, interval={self.reset_interval}, has_pts={bool(self.prev_pts_per_label)}, sam_updated={self.sam_updated}")
+        
+        return reset_needed
 
     def _reset_tracking_points(self, gray: np.ndarray) -> None:
         """特徴点を初期化
@@ -285,7 +317,6 @@ class OptFlowNode(Node):
             return
             
         self.prev_pts_per_label = {}
-        self.tracking_masks_per_label = {}
         
         # ラベルごとにマスクを統合
         label_masks = self._merge_masks_by_label()
@@ -298,9 +329,10 @@ class OptFlowNode(Node):
             )
             if points is not None:
                 self.prev_pts_per_label[label] = points
-                self.tracking_masks_per_label[label] = combined_mask.copy()
         
         self.prev_gray = gray
+        # リセット完了後、SAMフラグをクリア
+        self.sam_updated = False
         self.get_logger().info(f"特徴点初期化完了: {len(self.prev_pts_per_label)}ラベル")
     
     def _merge_masks_by_label(self) -> Dict[str, np.ndarray]:
@@ -370,182 +402,376 @@ class OptFlowNode(Node):
             )
 
             if new_pts is not None and status is not None:
-                # トラッキング結果をマスクに描画
-                tracking_mask = self._create_tracking_mask(gray.shape, new_pts, status)
-                self.tracking_masks_per_label[label] = tracking_mask
-                
                 # 有効な特徴点のみを保持
                 valid_pts = new_pts[status == 1].reshape(-1, 1, 2)
                 self.prev_pts_per_label[label] = valid_pts
         
         self.prev_gray = gray.copy()
     
-    def _create_tracking_mask(
-        self, 
-        shape: Tuple[int, int], 
-        points: np.ndarray, 
-        status: np.ndarray
-    ) -> np.ndarray:
-        """トラッキング結果からマスクを作成
+    
+    def _publish_tracking_result_with_draw_image(self, image_cv: np.ndarray) -> None:
+        """トラッキング結果をdraw_imageを使って描画・配信
         
         Args:
-            shape: マスクの形状
-            points: 追跡された特徴点
-            status: 各特徴点の有効性
+            image_cv: 入力画像
+        """
+        try:
+            # トラッキング点からマスクとバウンディングボックスを生成
+            detection_data = self._prepare_tracking_detection_data(image_cv.shape[:2])
+            
+            if detection_data['masks']:
+                # draw_imageを使って描画
+                annotated_img = draw_image(
+                    image_cv,
+                    np.array(detection_data['masks']),
+                    np.array(detection_data['boxes']),
+                    np.array(detection_data['probs']),
+                    detection_data['labels']
+                )
+                
+                # ROSメッセージとして配信
+                ros_msg = self.bridge.cv2_to_imgmsg(annotated_img, encoding='rgb8')
+                ros_msg.header.stamp = self.get_clock().now().to_msg()
+                ros_msg.header.frame_id = 'camera_frame'
+                self.pub.publish(ros_msg)
+                
+                if self.frame_count % 30 == 0:
+                    self.get_logger().info(f"draw_imageでトラッキング結果を配信: ラベル数={len(detection_data['labels'])}")
+            else:
+                self.get_logger().debug("トラッキングデータが空のため配信をスキップ")
+                
+        except Exception as e:
+            self.get_logger().error(f"draw_imageトラッキング配信エラー: {repr(e)}")
+    
+    def _prepare_tracking_detection_data(self, image_shape: Tuple[int, int]) -> Dict:
+        """トラッキング点から描画用データを準備
+        
+        Args:
+            image_shape: 画像の形状 (height, width)
             
         Returns:
-            トラッキングマスク
+            描画用データの辞書
         """
-        tracking_mask = np.zeros(shape, dtype=np.uint8)
+        masks = []
+        labels = []
+        boxes = []
+        probs = []
         
-        for pt, valid in zip(points, status):
-            if valid:
-                x, y = pt.ravel()
-                cv2.circle(
-                    tracking_mask, 
-                    (int(x), int(y)), 
-                    self.tracking_circle_radius, 
-                    self.tracking_circle_color, 
-                    -1
-                )
+        for label, pts in self.prev_pts_per_label.items():
+            if pts is not None and len(pts) > 0:
+                # トラッキング点から小さなマスクを作成
+                mask = self._create_tracking_point_mask(pts, image_shape)
+                
+                # バウンディングボックスを計算
+                bbox = self._calculate_bounding_box_from_points(pts, image_shape)
+                
+                masks.append(mask.astype(np.float32))
+                labels.append(f'{label}_tracking')
+                boxes.append(bbox)
+                probs.append(1.0)
         
-        return tracking_mask
+        return {
+            'masks': masks,
+            'labels': labels,
+            'boxes': boxes,
+            'probs': probs
+        }
+    
+    def _create_tracking_point_mask(self, pts: np.ndarray, image_shape: Tuple[int, int]) -> np.ndarray:
+        """トラッキング点から小さなマスクを作成
+        
+        Args:
+            pts: トラッキング点
+            image_shape: 画像の形状
+            
+        Returns:
+            マスク
+        """
+        mask = np.zeros(image_shape, dtype=np.uint8)
+        
+        for pt in pts:
+            x, y = pt.ravel()
+            cv2.circle(mask, (int(x), int(y)), self.tracking_circle_radius, 255, -1)
+        
+        return mask
+    
+    def _calculate_bounding_box_from_points(self, pts: np.ndarray, image_shape: Tuple[int, int]) -> List[float]:
+        """トラッキング点からバウンディングボックスを計算
+        
+        Args:
+            pts: トラッキング点
+            image_shape: 画像の形状
+            
+        Returns:
+            バウンディングボックス [x1, y1, x2, y2]
+        """
+        if len(pts) == 0:
+            return [0, 0, 0, 0]
+        
+        # 点の座標を取得
+        x_coords = [pt[0][0] for pt in pts]
+        y_coords = [pt[0][1] for pt in pts]
+        
+        # 余裕を持たせてバウンディングボックスを計算
+        margin = self.tracking_circle_radius * 2
+        x1 = max(0, min(x_coords) - margin)
+        y1 = max(0, min(y_coords) - margin)
+        x2 = min(image_shape[1], max(x_coords) + margin)
+        y2 = min(image_shape[0], max(y_coords) + margin)
+        
+        return [float(x1), float(y1), float(x2), float(y2)]
+    
+    def _run_lang_sam_segmentation(self, image_cv: np.ndarray) -> None:
+        """LangSAMでセグメンテーションを実行し、SAMマスクを生成・配信
+        
+        Args:
+            image_cv: 入力画像
+        """
+        try:
+            # モデルが初期化されていない場合はスキップ
+            if self.model is None:
+                self.get_logger().warn("LangSAMモデルが初期化されていません。セグメンテーションをスキップします。")
+                return
+                
+            # OpenCV → PIL形式へ変換
+            image_pil = Image.fromarray(image_cv, mode='RGB')
 
-    def _publish_tracking_result(self, image_cv: np.ndarray) -> None:
-        """トラッキング結果を描画して配信
+            # セグメンテーション推論（エラーハンドリング強化）
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")  # 一時的にワーニングを抑制
+                
+                # GPU使用量を削減するため、CPUにフォールバック
+                try:
+                    results = self.model.predict([image_pil], [self.text_prompt])
+                except RuntimeError as cuda_error:
+                    if "No available kernel" in str(cuda_error) or "CUDA" in str(cuda_error):
+                        self.get_logger().warn(f"CUDA エラーが発生しました。CPUモードで再試行します: {cuda_error}")
+                        # CPUモードで再試行
+                        self._force_cpu_mode()
+                        results = self.model.predict([image_pil], [self.text_prompt])
+                    else:
+                        raise cuda_error
+
+            # SAMマスクとして内部データを更新
+            self._update_sam_data_from_results(results)
+            
+            # セグメンテーション結果を描画・配信
+            self._publish_sam_result(image_cv, results)
+            
+            # SAMマスクメッセージを配信
+            self._publish_sam_masks(results)
+
+        except Exception as e:
+            self.get_logger().error(f"LangSAMセグメンテーションエラー: {repr(e)}")
+            # エラー時はダミーデータを作成してトラッキングが継続できるようにする
+            self._create_fallback_sam_data(image_cv.shape[:2])
+    
+    def _update_sam_data_from_results(self, results: List[Dict]) -> None:
+        """LangSAMの結果から内部SAMデータを更新
+        
+        Args:
+            results: LangSAMの推論結果
+        """
+        try:
+            if not results or len(results) == 0:
+                self.get_logger().warn("LangSAMの結果が空です")
+                return
+                
+            first_result = results[0]
+            if 'masks' not in first_result or len(first_result['masks']) == 0:
+                self.get_logger().warn("LangSAMの結果にマスクが含まれていません")
+                return
+            
+            # マスクをuint8形式に変換
+            masks_uint8 = []
+            for mask in first_result['masks']:
+                mask_uint8 = (mask * 255).astype(np.uint8)
+                masks_uint8.append(mask_uint8)
+            
+            self.latest_sam_data = {
+                'labels': first_result['labels'],
+                'masks': masks_uint8
+            }
+            
+            # SAMマスクメッセージの受信回数をカウント（セグメンテーション実行回数）
+            self.sam_msg_count += 1
+            # LangSAM推論完了フラグをセット
+            self.sam_updated = True
+            
+        except Exception as e:
+            self.get_logger().error(f"SAMデータ更新エラー: {repr(e)}")
+    
+    def _publish_sam_result(self, image_cv: np.ndarray, results: List[Dict]) -> None:
+        """LangSAMのセグメンテーション結果を描画・配信
         
         Args:
             image_cv: 入力画像
+            results: LangSAMの推論結果
         """
-        if not self.tracking_masks_per_label:
-            return
+        try:
+            if not results or len(results) == 0:
+                return
+                
+            first_result = results[0]
+            if 'masks' not in first_result or len(first_result['masks']) == 0:
+                return
+                
+            masks = np.array(first_result['masks'])
+            boxes = np.array(first_result['boxes'])
+            probs = np.array(first_result.get('probs', [1.0] * len(first_result['masks'])))
+            labels = first_result['labels']
             
-        detection_data = self._prepare_detection_data(image_cv.shape[:2])
-        
-        if detection_data['masks']:
-            try:
-                annotated_img = draw_image(
-                    image_cv,
-                    np.array(detection_data['masks']),
-                    np.array(detection_data['boxes']),
-                    np.array(detection_data['probs']),
-                    detection_data['labels']
-                )
-                
-                ros_msg = self.bridge.cv2_to_imgmsg(annotated_img, encoding='rgb8')
-                self.pub.publish(ros_msg)
-                
-            except Exception as e:
-                self.get_logger().error(f"描画・配信エラー: {repr(e)}")
+            annotated_image = draw_image(
+                image_rgb=image_cv,
+                masks=masks,
+                xyxy=boxes,
+                probs=probs,
+                labels=labels
+            )
+
+            # セグメンテーション結果の配信
+            sam_msg = self.bridge.cv2_to_imgmsg(annotated_image, encoding='rgb8')
+            sam_msg.header.stamp = self.get_clock().now().to_msg()
+            sam_msg.header.frame_id = 'camera_frame'
+            self.sam_image_pub.publish(sam_msg)
+            
+            self.get_logger().info(f"SAMセグメンテーション結果を配信: ラベル数={len(labels)}")
+
+        except Exception as e:
+            self.get_logger().error(f"SAM結果描画・配信エラー: {repr(e)}")
     
-    def _prepare_detection_data(self, image_shape: Tuple[int, int]) -> Dict:
-        """描画用のデータを準備
+    def _publish_sam_masks(self, results: List[Dict]) -> None:
+        """SAMマスクメッセージを配信
+        
+        Args:
+            results: LangSAMの推論結果
+        """
+        try:
+            if not results or len(results) == 0:
+                return
+                
+            first_result = results[0]
+            if 'masks' not in first_result or len(first_result['masks']) == 0:
+                return
+                
+            sam_masks_msg = SamMasks()
+            sam_masks_msg.header.stamp = self.get_clock().now().to_msg()
+            sam_masks_msg.header.frame_id = 'camera_frame'
+            
+            masks = np.array(first_result['masks'])
+            boxes = np.array(first_result['boxes'])
+            probs = np.array(first_result.get('probs', [1.0] * len(first_result['masks'])))
+            labels = first_result['labels']
+            
+            # LangSAMの結果にプレフィックスを追加
+            sam_masks_msg.labels = [f"langsam_{label}" for label in labels]
+            sam_masks_msg.boxes = boxes.flatten().tolist()
+            sam_masks_msg.probs = probs.tolist()
+            
+            for mask in masks:
+                mask_uint8 = (mask * 255).astype(np.uint8)
+                mask_msg = self.bridge.cv2_to_imgmsg(mask_uint8, encoding='mono8')
+                mask_msg.header.stamp = sam_masks_msg.header.stamp
+                mask_msg.header.frame_id = sam_masks_msg.header.frame_id
+                sam_masks_msg.masks.append(mask_msg)
+            
+            self.sam_masks_pub.publish(sam_masks_msg)
+            
+            if self.frame_count % 30 == 0:
+                self.get_logger().info(f"LangSAM結果をSAMマスクとして配信: {len(sam_masks_msg.labels)}個")
+            
+        except Exception as e:
+            self.get_logger().error(f"LangSAM→SAMマスク配信エラー: {repr(e)}")
+    
+    def _configure_cuda_environment(self) -> None:
+        """CUDA環境の設定とワーニング抑制"""
+        try:
+            # CUDA最適化設定
+            os.environ['TORCH_CUDNN_SDPA_ENABLED'] = '1'
+            
+            # CUDA アーキテクチャの設定（警告を抑制）
+            if 'TORCH_CUDA_ARCH_LIST' not in os.environ:
+                os.environ['TORCH_CUDA_ARCH_LIST'] = '8.6'  # 一般的なアーキテクチャ
+            
+            # PyTorchの警告を抑制
+            warnings.filterwarnings("ignore", category=UserWarning)
+            
+            # CUDAが利用可能かチェック
+            if torch.cuda.is_available():
+                self.get_logger().info(f"CUDA利用可能: {torch.cuda.get_device_name(0)}")
+                # メモリ使用量を制限
+                torch.cuda.empty_cache()
+            else:
+                self.get_logger().info("CUDAが利用できません。CPUモードで実行します。")
+                
+        except Exception as e:
+            self.get_logger().warn(f"CUDA設定エラー: {repr(e)}")
+    
+    def _force_cpu_mode(self) -> None:
+        """CPUモードに強制的に切り替える"""
+        try:
+            # Torchデバイスを CPU に設定
+            if hasattr(self.model, 'sam'):
+                if hasattr(self.model.sam, 'to'):
+                    self.model.sam.to('cpu')
+            
+            # キャッシュをクリア
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+            self.get_logger().info("CPUモードに切り替えました")
+            
+        except Exception as e:
+            self.get_logger().error(f"CPUモード切り替えエラー: {repr(e)}")
+    
+    def _create_fallback_sam_data(self, image_shape: Tuple[int, int]) -> None:
+        """エラー時のフォールバック用SAMデータを作成
         
         Args:
             image_shape: 画像の形状 (height, width)
-            
-        Returns:
-            描画用データの辞書
         """
-        masks, labels, boxes, probs = [], [], [], []
-        
-        for label, mask in self.tracking_masks_per_label.items():
-            if not np.any(mask > 0):
-                continue
-                
-            masks.append((mask > 0).astype(np.float32))
-            labels.append(f'{label}_tracking')
-            boxes.append(self._calculate_bounding_box(mask, image_shape))
-            probs.append(1.0)
-        
-        return {
-            'masks': masks,
-            'labels': labels,
-            'boxes': boxes,
-            'probs': probs
-        }
+        try:
+            # ダミーマスクを作成（画像全体を対象とする）
+            height, width = image_shape
+            dummy_mask = np.ones((height, width), dtype=np.uint8) * 255
+            
+            self.latest_sam_data = {
+                'labels': ['fallback_object'],
+                'masks': [dummy_mask]
+            }
+            
+            # カウンターを更新
+            self.sam_msg_count += 1
+            
+            self.get_logger().info("フォールバック用SAMデータを作成しました")
+            
+        except Exception as e:
+            self.get_logger().error(f"フォールバックデータ作成エラー: {repr(e)}")
+
+
+def main(args=None):
+    """メイン関数"""
+    rclpy.init(args=args)
     
-    def _calculate_bounding_box(
-        self, 
-        mask: np.ndarray, 
-        image_shape: Tuple[int, int]
-    ) -> List[int]:
-        """マスクから境界ボックスを計算
+    try:
+        node = OptFlowNode()
         
-        Args:
-            mask: マスク画像
-            image_shape: 画像の形状 (height, width)
+        # マルチスレッド実行器を使用
+        executor = MultiThreadedExecutor(num_threads=4)
+        executor.add_node(node)
+        
+        try:
+            executor.spin()
+        finally:
+            executor.shutdown()
             
-        Returns:
-            境界ボックス [x1, y1, x2, y2]
-        """
-        y_indices, x_indices = np.where(mask > 0)
-        
-        if len(y_indices) > 0 and len(x_indices) > 0:
-            x1, y1 = x_indices.min(), y_indices.min()
-            x2, y2 = x_indices.max(), y_indices.max()
-            return [x1, y1, x2, y2]
-        else:
-            # フォールバック: 画像全体
-            return [0, 0, image_shape[1], image_shape[0]]
-    
-    def _publish_last_tracking_result(self, image_cv: np.ndarray) -> None:
-        """前回のトラッキング結果を表示（リセット時用）
-        
-        Args:
-            image_cv: 入力画像
-        """
-        if not self.last_published_masks:
-            return
-            
-        detection_data = self._prepare_detection_data_from_masks(
-            self.last_published_masks, image_cv.shape[:2]
-        )
-        
-        if detection_data['masks']:
-            try:
-                annotated_img = draw_image(
-                    image_cv,
-                    np.array(detection_data['masks']),
-                    np.array(detection_data['boxes']),
-                    np.array(detection_data['probs']),
-                    detection_data['labels']
-                )
-                
-                ros_msg = self.bridge.cv2_to_imgmsg(annotated_img, encoding='rgb8')
-                self.pub.publish(ros_msg)
-                
-            except Exception as e:
-                self.get_logger().error(f"前回結果描画・配信エラー: {repr(e)}")
-    
-    def _prepare_detection_data_from_masks(
-        self, 
-        masks_dict: Dict[str, np.ndarray], 
-        image_shape: Tuple[int, int]
-    ) -> Dict:
-        """マスク辞書から描画用データを準備
-        
-        Args:
-            masks_dict: ラベルをキーとするマスク辞書
-            image_shape: 画像の形状 (height, width)
-            
-        Returns:
-            描画用データの辞書
-        """
-        masks, labels, boxes, probs = [], [], [], []
-        
-        for label, mask in masks_dict.items():
-            if not np.any(mask > 0):
-                continue
-                
-            masks.append((mask > 0).astype(np.float32))
-            labels.append(f'{label}_tracking')
-            boxes.append(self._calculate_bounding_box(mask, image_shape))
-            probs.append(1.0)
-        
-        return {
-            'masks': masks,
-            'labels': labels,
-            'boxes': boxes,
-            'probs': probs
-        }
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if 'node' in locals():
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

@@ -14,26 +14,30 @@ def generate_launch_description():
 
     # ノードの定義とLaunchDescriptionの生成
     return LaunchDescription([
-        # Node(
-        #     package='lang_sam_wrapper',
-        #     executable='debug_lang_sam_node', # デバッグ用のノード
-        #     name='lang_sam_node',
-        #     output='screen',
-        #     parameters=[config_file],
-        #     remappings=[
-        #         ('/image', '/zed/zed_node/rgb/image_rect_color'),
-        #         ('/image_sam', '/image_sam'),
-        #     ],
-        # ),
+        # 統合されたLangSAM + Optical Flowノード
         Node(
             package='lang_sam_wrapper',
-            executable='main',  # メインのLangSAMノード
+            executable='optflow_node',
+            name='optflow_node',
             output='screen',
             parameters=[config_file],
             remappings=[
                 ('/image', '/zed/zed_node/rgb/image_rect_color'),
                 ('/image_sam', '/image_sam'),
+                ('/sam_masks', '/sam_masks'),
                 ('/image_optflow', '/image_optflow'),
             ],
         ),
+        # デバッグ用LangSAMノード（必要に応じてコメントアウト解除）
+        # Node(
+        #     package='lang_sam_wrapper',
+        #     executable='debug_lang_sam_node',
+        #     name='debug_lang_sam_node',
+        #     output='screen',
+        #     parameters=[config_file],
+        #     remappings=[
+        #         ('/image', '/zed/zed_node/rgb/image_rect_color'),
+        #         ('/image_sam', '/image_sam_debug'),
+        #     ],
+        # ),
     ])

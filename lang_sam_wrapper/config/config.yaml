@@ -7,8 +7,12 @@ lang_sam_node:
 
 optflow_node:
   ros__parameters:
-    # トラッキングのリセット間隔（秒）
-    reset_interval: 3 
+    # LangSAM parameters（統合された機能）
+    sam_model: "sam2.1_hiera_small"
+    text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."
+    
+    # トラッキングのリセット間隔（フレーム数）
+    reset_interval: 20 # セグメンテーション実行間隔（より頻繁に実行）
     
     # トラッキング対象の設定
     tracking_targets: "white line. human. red pylon. car. mobility." # "" → 全てのオブジェクトをトラッキング
@@ -16,7 +20,7 @@ optflow_node:
     # グリッド設定
     grid_size_x: 10
     grid_size_y: 8 
-    max_per_cell: 80 # 1セルあたりの最大トラッキング数
+    max_per_cell: 40 # 1セルあたりの最大トラッキング数（安定性のため削減）
     
     # トラッキングパラメータ
     quality_level: 0.001 # 特徴点検出の品質レベル
