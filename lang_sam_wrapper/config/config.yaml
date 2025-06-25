@@ -12,20 +12,20 @@ optflow_node:
     text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."
     
     # トラッキングのリセット間隔（フレーム数）
-    reset_interval: 20 # セグメンテーション実行間隔（より頻繁に実行）
+    reset_interval: 60 # セグメンテーション実行間隔（より頻繁に実行）
     
     # トラッキング対象の設定
     tracking_targets: "white line. human. red pylon. car. mobility." # "" → 全てのオブジェクトをトラッキング
     
     # グリッド設定
-    grid_size_x: 10
-    grid_size_y: 8 
+    grid_size_x: 15
+    grid_size_y: 12 
     max_per_cell: 40 # 1セルあたりの最大トラッキング数（安定性のため削減）
     
     # トラッキングパラメータ
-    quality_level: 0.001 # 特徴点検出の品質レベル
+    quality_level: 0.0001 # 特徴点検出の品質レベル
     min_distance: 1 # 特徴点間の最小距離
-    block_size: 3 # 特徴点検出のブロックサイズ
+    block_size: 1 # 特徴点検出のブロックサイズ
     
     # トラッキング可視化パラメータ
     tracking_circle_radius: 4 # トラッキング円の半径
