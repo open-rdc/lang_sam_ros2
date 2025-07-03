@@ -12,7 +12,7 @@ optflow_node:
     text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."
     
     # トラッキングのリセット間隔（フレーム数）
-    reset_interval: 60 # セグメンテーション実行間隔（より頻繁に実行）
+    reset_interval: 10 # セグメンテーション実行間隔（より頻繁に実行）
     
     # トラッキング対象の設定
     tracking_targets: "white line. human. red pylon. car. mobility." # "" → 全てのオブジェクトをトラッキング

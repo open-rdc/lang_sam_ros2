@@ -271,6 +271,7 @@ class OptFlowNode(Node):
             published = False
             if self.prev_pts_per_label:
                 self._publish_tracking_result_with_draw_image(image_cv)
+                self._publish_tracking_sam_masks(image_cv.shape[:2])
                 published = True
             
             # デバッグログ
@@ -747,6 +748,57 @@ class OptFlowNode(Node):
             
         except Exception as e:
             self.get_logger().error(f"フォールバックデータ作成エラー: {repr(e)}")
+    
+    def _publish_tracking_sam_masks(self, image_shape: Tuple[int, int]) -> None:
+        """トラッキング結果をSAMマスクとして配信
+        
+        Args:
+            image_shape: 画像の形状 (height, width)
+        """
+        try:
+            if not self.prev_pts_per_label:
+                return
+                
+            sam_masks_msg = SamMasks()
+            sam_masks_msg.header.stamp = self.get_clock().now().to_msg()
+            sam_masks_msg.header.frame_id = 'camera_frame'
+            
+            masks = []
+            labels = []
+            boxes = []
+            probs = []
+            
+            for label, pts in self.prev_pts_per_label.items():
+                if pts is not None and len(pts) > 0:
+                    # トラッキング点から小さなマスクを作成
+                    mask = self._create_tracking_point_mask(pts, image_shape)
+                    
+                    # バウンディングボックスを計算
+                    bbox = self._calculate_bounding_box_from_points(pts, image_shape)
+                    
+                    # マスクをROSメッセージに変換
+                    mask_msg = self.bridge.cv2_to_imgmsg(mask, encoding='mono8')
+                    mask_msg.header.stamp = sam_masks_msg.header.stamp
+                    mask_msg.header.frame_id = sam_masks_msg.header.frame_id
+                    
+                    masks.append(mask_msg)
+                    labels.append(f'{label}_tracking')
+                    boxes.extend(bbox)  # x1, y1, x2, y2を追加
+                    probs.append(1.0)
+            
+            if len(masks) > 0:
+                sam_masks_msg.masks = masks
+                sam_masks_msg.labels = labels
+                sam_masks_msg.boxes = boxes
+                sam_masks_msg.probs = probs
+                
+                self.sam_masks_pub.publish(sam_masks_msg)
+                
+                if self.frame_count % 30 == 0:
+                    self.get_logger().info(f"トラッキング結果をSAMマスクとして配信: {len(labels)}個")
+            
+        except Exception as e:
+            self.get_logger().error(f"トラッキング→SAMマスク配信エラー: {repr(e)}")
 
 
 def main(args=None):
