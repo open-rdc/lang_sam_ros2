@@ -136,7 +136,7 @@ class InterpolationNode(Node):
     
     def _publish_image_with_tracking(self):
         """
-        元画像にトラッキング点を重ねて配信（画像ベース）
+        元画像にトラッキング点を重ねて配信（draw_imageベース）
         """
         if self.latest_image is None:
             return
@@ -147,7 +147,7 @@ class InterpolationNode(Node):
             
             # 現在のトラッキング点があれば描画
             if self.last_valid_tracking_points:
-                annotated_image = self._draw_simple_tracking_points(image_cv, self.last_valid_tracking_points)
+                annotated_image = self._publish_image_with_draw_image(image_cv)
             else:
                 # トラッキング点がない場合は元画像をそのまま
                 annotated_image = image_cv.copy()
@@ -230,56 +230,122 @@ class InterpolationNode(Node):
         return points
     
     
-    def _draw_simple_tracking_points(self, image: np.ndarray, tracking_points_dict):
+    def _publish_image_with_draw_image(self, image_cv: np.ndarray) -> np.ndarray:
         """
-        画像にトラッキング点を描画（シンプル版）
+        トラッキング結果をdraw_imageを使って描画（OptFlowNodeと同じスタイル）
         
         Args:
-            image: 入力画像
-            tracking_points_dict: {label: points} の辞書
+            image_cv: 入力画像
             
         Returns:
             np.ndarray: 描画済み画像
         """
-        annotated_image = image.copy()
-        
-        # 色の定義（異なるラベルごとに異なる色）
-        colors = [
-            (0, 255, 0),    # Green
-            (255, 0, 0),    # Blue (BGR format)
-            (0, 0, 255),    # Red
-            (255, 255, 0),  # Cyan
-            (255, 0, 255),  # Magenta
-            (0, 255, 255),  # Yellow
-        ]
-        
-        for i, (label, points) in enumerate(tracking_points_dict.items()):
-            color = colors[i % len(colors)]
+        try:
+            # トラッキング点からマスクとバウンディングボックスを生成
+            detection_data = self._prepare_tracking_detection_data(image_cv.shape[:2])
             
-            # 各点を円で描画
-            for point in points:
-                cv2.circle(
-                    annotated_image, 
-                    tuple(point.astype(int)), 
-                    self.tracking_circle_radius, 
-                    color, 
-                    -1
+            if detection_data['masks']:
+                # draw_imageを使って描画
+                annotated_img = draw_image(
+                    image_cv,
+                    np.array(detection_data['masks']),
+                    np.array(detection_data['boxes']),
+                    np.array(detection_data['probs']),
+                    detection_data['labels']
                 )
-            
-            # ラベルを描画（最初の点の近くに）
-            if len(points) > 0:
-                label_pos = (int(points[0][0]) + 10, int(points[0][1]) - 10)
-                cv2.putText(
-                    annotated_image,
-                    label,
-                    label_pos,
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    color,
-                    1
-                )
+                
+                return annotated_img
+            else:
+                return image_cv.copy()
+                
+        except Exception as e:
+            self.get_logger().error(f"draw_image描画エラー: {repr(e)}")
+            return image_cv.copy()
+    
+    def _prepare_tracking_detection_data(self, image_shape):
+        """
+        トラッキング点から描画用データを準備（OptFlowNodeと同じロジック）
         
-        return annotated_image
+        Args:
+            image_shape: 画像の形状 (height, width)
+            
+        Returns:
+            描画用データの辞書
+        """
+        masks = []
+        labels = []
+        boxes = []
+        probs = []
+        
+        for label, pts in self.last_valid_tracking_points.items():
+            if pts is not None and len(pts) > 0:
+                # トラッキング点から小さなマスクを作成
+                mask = self._create_tracking_point_mask(pts, image_shape)
+                
+                # バウンディングボックスを計算
+                bbox = self._calculate_bounding_box_from_points(pts, image_shape)
+                
+                masks.append(mask.astype(np.float32))
+                labels.append(f'{label}_tracking')
+                boxes.append(bbox)
+                probs.append(1.0)
+        
+        return {
+            'masks': masks,
+            'labels': labels,
+            'boxes': boxes,
+            'probs': probs
+        }
+    
+    def _create_tracking_point_mask(self, pts: np.ndarray, image_shape) -> np.ndarray:
+        """
+        トラッキング点から小さなマスクを作成
+        
+        Args:
+            pts: トラッキング点
+            image_shape: 画像の形状
+            
+        Returns:
+            マスク
+        """
+        mask = np.zeros(image_shape, dtype=np.uint8)
+        
+        for pt in pts:
+            x, y = pt.ravel() if len(pt.shape) > 1 else pt
+            cv2.circle(mask, (int(x), int(y)), self.tracking_circle_radius, 255, -1)
+        
+        return mask
+    
+    def _calculate_bounding_box_from_points(self, pts: np.ndarray, image_shape):
+        """
+        トラッキング点からバウンディングボックスを計算
+        
+        Args:
+            pts: トラッキング点
+            image_shape: 画像の形状
+            
+        Returns:
+            バウンディングボックス [x1, y1, x2, y2]
+        """
+        if len(pts) == 0:
+            return [0, 0, 0, 0]
+        
+        # 点の座標を取得（2次元配列形式に対応）
+        if len(pts.shape) > 1 and pts.shape[1] == 2:
+            x_coords = pts[:, 0]
+            y_coords = pts[:, 1]
+        else:
+            x_coords = [pt[0] for pt in pts]
+            y_coords = [pt[1] for pt in pts]
+        
+        # 余裕を持たせてバウンディングボックスを計算
+        margin = self.tracking_circle_radius * 2
+        x1 = max(0, min(x_coords) - margin)
+        y1 = max(0, min(y_coords) - margin)
+        x2 = min(image_shape[1], max(x_coords) + margin)
+        y2 = min(image_shape[0], max(y_coords) + margin)
+        
+        return [float(x1), float(y1), float(x2), float(y2)]
 
 
 def main(args=None):
