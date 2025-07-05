@@ -2,8 +2,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
-from lang_sam_msgs.msg import SamMasks
+from lang_sam_msgs.msg import FeaturePoints
 from sensor_msgs.msg import Image as ROSImage
+from geometry_msgs.msg import Point32
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
@@ -15,7 +16,7 @@ class InterpolationNode(Node):
     """
     interpolationノード
     
-    optflow_nodeから出力されるトラッキングデータ(/sam_masks)から
+    optflow_nodeから出力されるトラッキングデータ(/image_optflow_features)から
     トラッキング点のみを抽出して画像に描画するノード
     """
     
@@ -44,7 +45,7 @@ class InterpolationNode(Node):
     def _init_parameters(self):
         """パラメータの初期化"""
         # 入力トピック名
-        self.declare_parameter('input_topic', '/sam_masks')
+        self.declare_parameter('input_topic', '/image_optflow_features')
         self.input_topic = self.get_parameter('input_topic').get_parameter_value().string_value
         
         # 出力トピック名
@@ -73,11 +74,11 @@ class InterpolationNode(Node):
     
     def _init_ros_communication(self):
         """ROS通信の初期化"""
-        # SAMマスクデータのサブスクライバー（独立したコールバックグループ）
-        self.sam_masks_sub = self.create_subscription(
-            SamMasks,
+        # FeaturePointsデータのサブスクライバー（独立したコールバックグループ）
+        self.feature_points_sub = self.create_subscription(
+            FeaturePoints,
             self.input_topic,
-            self.sam_masks_callback,
+            self.feature_points_callback,
             self.qos_size,
             callback_group=self.sam_callback_group
         )
@@ -101,9 +102,6 @@ class InterpolationNode(Node):
         
         # 内部状態の初期化
         self.latest_image = None
-        self.latest_sam_masks = None
-        
-        # トラッキング補間用の状態
         self.last_valid_tracking_points = {}  # 最後の有効なトラッキング点を保持
         
         self.get_logger().info("ROS communication initialized")
@@ -121,18 +119,15 @@ class InterpolationNode(Node):
             # 画像ベースで即座に配信（SAMマスクを待たない）
             self._publish_image_with_tracking()
     
-    def sam_masks_callback(self, msg: SamMasks):
+    def feature_points_callback(self, msg: FeaturePoints):
         """
-        SAMマスクデータのコールバック - トラッキング点のみ更新
+        FeaturePointsデータのコールバック - トラッキング点のみ更新
         
         Args:
-            msg: SAMマスクメッセージ
+            msg: FeaturePointsメッセージ
         """
         with self.processing_lock:
-            self.latest_sam_masks = msg
-            self.get_logger().debug(f"Received SAM masks: {len(msg.labels)} labels")
-            # トラッキング点のみ更新（画像配信はimage_callbackで行う）
-            self._update_tracking_points_from_sam_masks(msg)
+            self._update_tracking_points_from_feature_points(msg)
     
     def _publish_image_with_tracking(self):
         """
@@ -149,7 +144,6 @@ class InterpolationNode(Node):
             if self.last_valid_tracking_points:
                 annotated_image = self._publish_image_with_draw_image(image_cv)
             else:
-                # トラッキング点がない場合は元画像をそのまま
                 annotated_image = image_cv.copy()
             
             # ROSメッセージとして配信
@@ -158,76 +152,46 @@ class InterpolationNode(Node):
             ros_msg.header.frame_id = 'camera_frame'
             self.interpolated_pub.publish(ros_msg)
             
-            # デバッグ情報（30フレームごとに出力）
-            if hasattr(self, 'frame_count'):
-                self.frame_count += 1
-            else:
-                self.frame_count = 1
-            
-            if self.frame_count % 30 == 0:
-                point_count = sum(len(points) for points in self.last_valid_tracking_points.values())
-                self.get_logger().info(
-                    f"Published image with {point_count} tracking points to {self.output_topic}"
-                )
                 
         except Exception as e:
             self.get_logger().error(f"Error in _publish_image_with_tracking: {repr(e)}")
     
-    def _update_tracking_points_from_sam_masks(self, sam_masks_msg: SamMasks):
+    def _update_tracking_points_from_feature_points(self, feature_points_msg: FeaturePoints):
         """
-        SAMマスクからトラッキング点を高速で更新（軽量版）
+        FeaturePointsメッセージからトラッキング点を高速で更新
         
         Args:
-            sam_masks_msg: SAMマスクメッセージ
+            feature_points_msg: FeaturePointsメッセージ
         """
         try:
             new_tracking_points = {}
             
-            for i, label in enumerate(sam_masks_msg.labels):
-                # "_tracking"で終わるラベルのみ処理
-                if label.endswith('_tracking') and i < len(sam_masks_msg.masks):
-                    mask_msg = sam_masks_msg.masks[i]
-                    mask_cv = self.bridge.imgmsg_to_cv2(mask_msg, desired_encoding='mono8')
+            # 各ラベルごとに特徴点を取得
+            point_index = 0
+            for i, label in enumerate(feature_points_msg.labels):
+                if i < len(feature_points_msg.point_counts):
+                    point_count = feature_points_msg.point_counts[i]
                     
-                    # 高速な特徴点抽出（マスクから直接座標を取得）
-                    points = self._fast_extract_points_from_mask(mask_cv)
-                    if len(points) > 0:
-                        clean_label = label.replace('_tracking', '')
-                        new_tracking_points[clean_label] = points
+                    # 該当する特徴点を取得
+                    if point_index + point_count <= len(feature_points_msg.points):
+                        label_points = feature_points_msg.points[point_index:point_index + point_count]
+                        
+                        # Point32からnumpy配列に変換
+                        points = np.array([[p.x, p.y] for p in label_points])
+                        
+                        if len(points) > 0:
+                            clean_label = label.replace('_tracking', '')
+                            new_tracking_points[clean_label] = points
+                        
+                        point_index += point_count
             
             # 新しいデータがあれば更新
             if new_tracking_points:
                 self.last_valid_tracking_points = new_tracking_points
-                self.get_logger().debug(f"Updated tracking points: {len(new_tracking_points)} labels")
             
         except Exception as e:
-            self.get_logger().error(f"Error in _update_tracking_points_from_sam_masks: {repr(e)}")
+            self.get_logger().error(f"Error in _update_tracking_points_from_feature_points: {repr(e)}")
     
-    def _fast_extract_points_from_mask(self, mask: np.ndarray):
-        """
-        マスクから特徴点を高速抽出
-        
-        Args:
-            mask: バイナリマスク
-            
-        Returns:
-            np.ndarray: 特徴点の配列
-        """
-        # 白い部分の座標を直接取得（最も高速）
-        y_coords, x_coords = np.where(mask > 128)
-        
-        if len(x_coords) == 0:
-            return np.array([])
-        
-        # サンプリングして点数を制限（パフォーマンス向上）
-        if len(x_coords) > 50:  # 最大50点に制限
-            indices = np.random.choice(len(x_coords), 50, replace=False)
-            x_coords = x_coords[indices]
-            y_coords = y_coords[indices]
-        
-        # [x, y]の形式で返す
-        points = np.column_stack((x_coords, y_coords))
-        return points
     
     
     def _publish_image_with_draw_image(self, image_cv: np.ndarray) -> np.ndarray:

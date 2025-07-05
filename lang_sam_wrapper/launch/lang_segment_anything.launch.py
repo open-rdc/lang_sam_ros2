@@ -28,6 +28,18 @@ def generate_launch_description():
                 ('/image_optflow', '/image_optflow'),
             ],
         ),
+        # InterpolationNode - トラッキング結果の表示
+        Node(
+            package='lang_sam_wrapper',
+            executable='interpolation_node',
+            name='interpolation_node',
+            output='screen',
+            parameters=[{
+                'input_topic': '/image_optflow_features',
+                'output_topic': '/sam_masks_interpolated',
+                'image_topic': '/zed/zed_node/rgb/image_rect_color',
+            }],
+        ),
         # デバッグ用LangSAMノード（必要に応じてコメントアウト解除）
         # Node(
         #     package='lang_sam_wrapper',

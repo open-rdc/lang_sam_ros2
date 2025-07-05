@@ -7,7 +7,8 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 from typing import Dict, List, Optional, Tuple
-from lang_sam_msgs.msg import SamMasks
+from geometry_msgs.msg import Point32
+from lang_sam_msgs.msg import SamMasks, FeaturePoints
 from lang_sam.utils import draw_image
 from lang_sam import LangSAM
 from PIL import Image
@@ -179,11 +180,6 @@ class OptFlowNode(Node):
             ROSImage, '/image', self.image_callback, 10,
             callback_group=self.image_callback_group
         )
-        # SAMマスクの配信（LangSAMの結果とトラッキング結果の両方）
-        self.sam_masks_pub = self.create_publisher(
-            SamMasks, '/sam_masks', 10,
-            callback_group=self.publisher_callback_group
-        )
         # セグメンテーション結果画像の配信
         self.sam_image_pub = self.create_publisher(
             ROSImage, '/image_sam', 10,
@@ -192,6 +188,11 @@ class OptFlowNode(Node):
         # オプティカルフロー結果の配信
         self.pub = self.create_publisher(
             ROSImage, '/image_optflow', 10,
+            callback_group=self.publisher_callback_group
+        )
+        # FeaturePointsメッセージの配信
+        self.feature_points_pub = self.create_publisher(
+            FeaturePoints, '/image_optflow_features', 10,
             callback_group=self.publisher_callback_group
         )
 
@@ -253,13 +254,9 @@ class OptFlowNode(Node):
             image_cv = image_cv.astype(np.uint8, copy=True)
             gray = cv2.cvtColor(image_cv, cv2.COLOR_RGB2GRAY)
 
-            # デバッグログ
-            if self.frame_count % 30 == 0:  # 30フレームごとにログ出力
-                self.get_logger().info(f"フレーム処理中: {self.frame_count}, 画像サイズ: {image_cv.shape}")
 
             is_reset = self._should_reset_tracking()
             if is_reset:
-                self.get_logger().info(f"トラッキングリセット実行 (フレーム: {self.frame_count})")
                 # LangSAMセグメンテーション実行
                 self._run_lang_sam_segmentation(image_cv)
                 # SAMの結果を使ってトラッキング初期化
@@ -272,11 +269,9 @@ class OptFlowNode(Node):
             if self.prev_pts_per_label:
                 self._publish_tracking_result_with_draw_image(image_cv)
                 self._publish_tracking_sam_masks(image_cv.shape[:2])
+                self._publish_feature_points(image_cv)
                 published = True
             
-            # デバッグログ
-            if self.frame_count % 30 == 0:
-                self.get_logger().info(f"結果配信: {published}, トラッキングラベル数: {len(self.prev_pts_per_label)}")
 
             self.frame_count += 1
 
@@ -303,8 +298,6 @@ class OptFlowNode(Node):
         
         reset_needed = should_run_sam or force_reset or sam_ready_for_reset
         
-        if reset_needed and self.frame_count % 30 == 0:
-            self.get_logger().info(f"リセット判定: frame={self.frame_count}, interval={self.reset_interval}, has_pts={bool(self.prev_pts_per_label)}, sam_updated={self.sam_updated}")
         
         return reset_needed
 
@@ -334,7 +327,6 @@ class OptFlowNode(Node):
         self.prev_gray = gray
         # リセット完了後、SAMフラグをクリア
         self.sam_updated = False
-        self.get_logger().info(f"特徴点初期化完了: {len(self.prev_pts_per_label)}ラベル")
     
     def _merge_masks_by_label(self) -> Dict[str, np.ndarray]:
         """ラベルごとにマスクを統合（トラッキング対象のみ）
@@ -436,8 +428,6 @@ class OptFlowNode(Node):
                 ros_msg.header.frame_id = 'camera_frame'
                 self.pub.publish(ros_msg)
                 
-                if self.frame_count % 30 == 0:
-                    self.get_logger().info(f"draw_imageでトラッキング結果を配信: ラベル数={len(detection_data['labels'])}")
             else:
                 self.get_logger().debug("トラッキングデータが空のため配信をスキップ")
                 
@@ -636,7 +626,6 @@ class OptFlowNode(Node):
             sam_msg.header.frame_id = 'camera_frame'
             self.sam_image_pub.publish(sam_msg)
             
-            self.get_logger().info(f"SAMセグメンテーション結果を配信: ラベル数={len(labels)}")
 
         except Exception as e:
             self.get_logger().error(f"SAM結果描画・配信エラー: {repr(e)}")
@@ -678,8 +667,6 @@ class OptFlowNode(Node):
             
             self.sam_masks_pub.publish(sam_masks_msg)
             
-            if self.frame_count % 30 == 0:
-                self.get_logger().info(f"LangSAM結果をSAMマスクとして配信: {len(sam_masks_msg.labels)}個")
             
         except Exception as e:
             self.get_logger().error(f"LangSAM→SAMマスク配信エラー: {repr(e)}")
@@ -744,7 +731,6 @@ class OptFlowNode(Node):
             # カウンターを更新
             self.sam_msg_count += 1
             
-            self.get_logger().info("フォールバック用SAMデータを作成しました")
             
         except Exception as e:
             self.get_logger().error(f"フォールバックデータ作成エラー: {repr(e)}")
@@ -794,11 +780,67 @@ class OptFlowNode(Node):
                 
                 self.sam_masks_pub.publish(sam_masks_msg)
                 
-                if self.frame_count % 30 == 0:
-                    self.get_logger().info(f"トラッキング結果をSAMマスクとして配信: {len(labels)}個")
             
         except Exception as e:
             self.get_logger().error(f"トラッキング→SAMマスク配信エラー: {repr(e)}")
+
+    def _publish_feature_points(self, image_cv: np.ndarray) -> None:
+        """トラッキング結果をFeaturePointsメッセージとして配信
+        
+        Args:
+            image_cv: 入力画像
+        """
+        try:
+            if not self.prev_pts_per_label:
+                return
+                
+            feature_points_msg = FeaturePoints()
+            feature_points_msg.header.stamp = self.get_clock().now().to_msg()
+            feature_points_msg.header.frame_id = 'camera_frame'
+            
+            # 元画像を設定
+            feature_points_msg.source_image = self.bridge.cv2_to_imgmsg(image_cv, encoding='rgb8')
+            feature_points_msg.source_image.header = feature_points_msg.header
+            
+            all_points = []
+            labels = []
+            point_counts = []
+            boxes = []
+            probs = []
+            
+            for label, pts in self.prev_pts_per_label.items():
+                if pts is not None and len(pts) > 0:
+                    # 特徴点をPoint32の配列に変換
+                    label_points = []
+                    for pt in pts:
+                        x, y = pt.ravel()
+                        point32 = Point32()
+                        point32.x = float(x)
+                        point32.y = float(y)
+                        point32.z = 0.0
+                        label_points.append(point32)
+                    
+                    # バウンディングボックスを計算
+                    bbox = self._calculate_bounding_box_from_points(pts, image_cv.shape[:2])
+                    
+                    all_points.extend(label_points)
+                    labels.append(f'{label}_tracking')
+                    point_counts.append(len(label_points))
+                    boxes.extend(bbox)  # x1, y1, x2, y2を追加
+                    probs.append(1.0)
+            
+            if len(all_points) > 0:
+                feature_points_msg.points = all_points
+                feature_points_msg.labels = labels
+                feature_points_msg.point_counts = point_counts
+                feature_points_msg.boxes = boxes
+                feature_points_msg.probs = probs
+                
+                self.feature_points_pub.publish(feature_points_msg)
+                
+            
+        except Exception as e:
+            self.get_logger().error(f"FeaturePoints配信エラー: {repr(e)}")
 
 
 def main(args=None):
