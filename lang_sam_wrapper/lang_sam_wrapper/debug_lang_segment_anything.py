@@ -22,10 +22,21 @@ class LangSAMNode(Node):
         super().__init__('lang_sam_node')
 
         # ========================================
-        # パラメータの宣言と取得
+        # パラメータの宣言と取得（config.yamlから完全制御）
         # ========================================
-        self.sam_model = self.declare_and_get_parameter('sam_model', 'sam2.1_hiera_small')
-        self.text_prompt = self.declare_and_get_parameter('text_prompt', 'car. wheel.')
+        self.sam_model = self.get_config_param('sam_model')
+        self.text_prompt = self.get_config_param('text_prompt')
+        
+        # CUDA設定パラメータ
+        self.cuda_arch_list = self.get_config_param('cuda_arch_list')
+        self.force_cpu_mode = self.get_config_param('force_cpu_mode')
+        
+        # パフォーマンス設定パラメータ
+        self.enable_torch_no_grad = self.get_config_param('enable_torch_no_grad')
+        self.enable_gpu_memory_cleanup = self.get_config_param('enable_gpu_memory_cleanup')
+        
+        # ログ設定パラメータ
+        self.enable_fps_logging = self.get_config_param('enable_fps_logging')
 
         self.get_logger().info(f"使用するSAMモデル: {self.sam_model}")
         self.get_logger().info(f"使用するText Prompt: {self.text_prompt}")
@@ -62,10 +73,31 @@ class LangSAMNode(Node):
 
         self.get_logger().info("LangSAMNode 起動完了")
 
+    def get_config_param(self, name: str):
+        """config.yamlからパラメータを取得（デフォルト値なし）"""
+        try:
+            self.declare_parameter(name)
+            param = self.get_parameter(name)
+            value = param.value
+            self.get_logger().info(f"パラメータ'{name}': {value} (config.yamlから読み込み)")
+            return value
+        except Exception as e:
+            self.get_logger().error(f"パラメータ'{name}'がconfig.yamlに定義されていません: {repr(e)}")
+            raise ValueError(f"Required parameter '{name}' not found in config.yaml")
+    
     def declare_and_get_parameter(self, name, default_value):
-        """パラメータを宣言して取得するユーティリティ関数"""
+        """パラメータを宣言して取得するユーティリティ関数（下位互換用）"""
         self.declare_parameter(name, default_value)
-        return self.get_parameter(name).get_parameter_value().string_value
+        if isinstance(default_value, str):
+            return self.get_parameter(name).get_parameter_value().string_value
+        elif isinstance(default_value, int):
+            return self.get_parameter(name).get_parameter_value().integer_value
+        elif isinstance(default_value, float):
+            return self.get_parameter(name).get_parameter_value().double_value
+        elif isinstance(default_value, bool):
+            return self.get_parameter(name).get_parameter_value().bool_value
+        else:
+            return self.get_parameter(name).value
 
     def image_callback(self, msg):
         self.update_fps()
@@ -86,19 +118,20 @@ class LangSAMNode(Node):
             # OpenCV → PIL形式へ変換
             image_pil = Image.fromarray(cv_image, mode='RGB')
 
-            # セグメンテーション推論（エラーハンドリング強化）
+            # セグメンテーション推論（エラーハンドリング強化とメモリ効率化）
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 
-                try:
-                    results = self.model.predict([image_pil], [self.text_prompt])
-                except RuntimeError as cuda_error:
-                    if "No available kernel" in str(cuda_error) or "CUDA" in str(cuda_error):
-                        self.get_logger().warn(f"CUDA エラーが発生しました。CPUモードで再試行します: {cuda_error}")
-                        self._force_cpu_mode()
+                with torch.no_grad():  # メモリ効率化
+                    try:
                         results = self.model.predict([image_pil], [self.text_prompt])
-                    else:
-                        raise cuda_error
+                    except RuntimeError as cuda_error:
+                        if "No available kernel" in str(cuda_error) or "CUDA" in str(cuda_error):
+                            self.get_logger().warn(f"CUDA エラーが発生しました。CPUモードで再試行します: {cuda_error}")
+                            self._force_cpu_mode()
+                            results = self.model.predict([image_pil], [self.text_prompt])
+                        else:
+                            raise cuda_error
 
             # 結果描画および送信
             self.publish_annotated_image(cv_image, results)
@@ -134,17 +167,18 @@ class LangSAMNode(Node):
                 labels=first_result['labels']
             )
 
-            # FPS情報を画像に描画
-            cv2.putText(
-                annotated_image,
-                f"FPS: {self.fps:.2f}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (0, 0, 255),
-                2,
-                cv2.LINE_AA
-            )
+            # FPS情報を画像に描画（config.yamlの設定に基づく）
+            if self.enable_fps_logging:
+                cv2.putText(
+                    annotated_image,
+                    f"FPS: {self.fps:.2f}",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA
+                )
 
             # OpenCV → ROSメッセージ変換および送信
             mask_msg = self.bridge.cv2_to_imgmsg(annotated_image, encoding='rgb8')
@@ -159,8 +193,10 @@ class LangSAMNode(Node):
         """CUDA環境の設定とワーニング抑制"""
         try:
             os.environ['TORCH_CUDNN_SDPA_ENABLED'] = '1'
+            # CUDA アーキテクチャの設定（config.yamlから読み込み）
             if 'TORCH_CUDA_ARCH_LIST' not in os.environ:
-                os.environ['TORCH_CUDA_ARCH_LIST'] = '8.6'
+                os.environ['TORCH_CUDA_ARCH_LIST'] = self.cuda_arch_list
+                self.get_logger().info(f"CUDA_ARCH_LIST設定: {self.cuda_arch_list}")
             warnings.filterwarnings("ignore", category=UserWarning)
             
             if torch.cuda.is_available():

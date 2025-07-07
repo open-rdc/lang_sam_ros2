@@ -14,6 +14,7 @@ find_package(std_msgs REQUIRED)
 # generate interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/SamMasks.msg"
+  "msg/FeaturePoints.msg"
   DEPENDENCIES sensor_msgs std_msgs
 )
 
