@@ -154,7 +154,7 @@ class OptFlowNode(Node):
         
         # 数値パラメータの範囲チェック
         if self.reset_interval <= 0:
-            validation_errors.append(f"reset_interval must be > 0, got {self.reset_interval}")
+            validation_errors.append(f"reset_interval must be > 0 seconds, got {self.reset_interval}")
         
         if self.max_per_cell <= 0:
             validation_errors.append(f"max_per_cell must be > 0, got {self.max_per_cell}")
@@ -296,6 +296,9 @@ class OptFlowNode(Node):
         self.frame_count = 0
         self.sam_msg_count = 0  # SAMマスクメッセージの受信回数
         self.memory_cleanup_counter = 0  # メモリクリーンアップカウンター
+        
+        # 時間ベースリセット用の時刻管理
+        self.last_reset_time = time.time()
     
     def _init_ros_communication(self) -> None:
         """ROS通信の設定"""
@@ -499,12 +502,15 @@ class OptFlowNode(Node):
         Returns:
             初期化が必要な場合True
         """
+        current_time = time.time()
+        
         # 初回またはトラッキング点がない場合は必ずリセット
         force_reset = not self.prev_pts_per_label or self.frame_count == 0
         
-        # LangSAMセグメンテーションを実行する条件（reset_intervalに基づく）
+        # 時間ベースのリセット判定（reset_intervalに基づく）
+        time_elapsed = current_time - self.last_reset_time
         should_run_sam = (
-            self.frame_count % self.reset_interval == 0 or 
+            time_elapsed >= self.reset_interval or 
             self.frame_count == 0
         )
         
@@ -515,14 +521,18 @@ class OptFlowNode(Node):
         
         # デバッグログ（reset_interval動作確認）
         if should_run_sam and self.frame_count > 0:
-            self.get_logger().info(f"reset_interval動作: frame_count={self.frame_count}, reset_interval={self.reset_interval}")
+            self.get_logger().info(f"時間ベースreset_interval動作: 経過時間={time_elapsed:.2f}秒, reset_interval={self.reset_interval}秒")
+        
+        # リセット実行時に時刻を更新
+        if reset_needed and should_run_sam:
+            self.last_reset_time = current_time
         
         if reset_needed:
             reset_reason = []
             if force_reset:
                 reset_reason.append("force_reset")
             if should_run_sam:
-                reset_reason.append("should_run_sam")
+                reset_reason.append("time_based_reset")
             if sam_ready_for_reset:
                 reset_reason.append("sam_ready_for_reset")
             self.get_logger().debug(f"トラッキングリセット実行: 理由={', '.join(reset_reason)}")

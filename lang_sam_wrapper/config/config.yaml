@@ -22,8 +22,8 @@ optflow_node:
     sam_model: "sam2.1_hiera_small"
     text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."
     
-    # トラッキングのリセット間隔（フレーム数）
-    reset_interval: 30  # セグメンテーション実行間隔（より頻繁に実行）
+    # トラッキングのリセット間隔（秒）
+    reset_interval: 3.0  # セグメンテーション実行間隔（秒単位）
     
     # トラッキング対象の設定
     tracking_targets: "white line. human. red pylon. car. mobility." # "" → 全てのオブジェクトをトラッキング
