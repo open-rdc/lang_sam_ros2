@@ -17,8 +17,8 @@ def generate_launch_description():
         # 統合されたLangSAM + Optical Flowノード
         Node(
             package='lang_sam_wrapper',
-            executable='optflow_node',
-            name='optflow_node',
+            executable='langsam_with_optflow_node',
+            name='langsam_with_optflow_node',
             output='screen',
             parameters=[config_file],
             remappings=[

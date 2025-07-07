@@ -1,3 +1,3 @@
 # lang_sam_ros2 パッケージ初期化
-from .optflow_node import OptFlowNode
+from .langsam_with_optflow_node import LangSamWithOptFlowNode
 from .debug_lang_segment_anything import LangSAMNode

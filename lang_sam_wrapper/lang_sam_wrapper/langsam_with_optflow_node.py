@@ -31,16 +31,19 @@ def sample_features_grid(
     min_distance: int = 1,
     block_size: int = 3
 ) -> Optional[np.ndarray]:
-    """グリッドごとに特徴点を抽出する関数
+    """グリッドベースで特徴点を抽出
     
     Args:
         gray: グレースケール画像
         mask: マスク画像
         grid_size: グリッドサイズ (y, x)
         max_per_cell: セルあたりの最大特徴点数
+        quality_level: 特徴点品質閾値
+        min_distance: 特徴点間最小距離
+        block_size: コーナー検出ブロックサイズ
         
     Returns:
-        抽出された特徴点の配列、見つからない場合はNone
+        特徴点配列またはNone
     """
     h, w = gray.shape
     step_y = h // grid_size[0]
@@ -72,14 +75,50 @@ def sample_features_grid(
     return np.array(all_pts) if all_pts else None
 
 
-class OptFlowNode(Node):
-    """LangSAM + Optical Flow処理を行うROSノード
+def sample_features_dense(
+    gray: np.ndarray,
+    mask: np.ndarray,
+    sampling_step: int = 3,
+    max_points: int = 50000
+) -> Optional[np.ndarray]:
+    """高密度サンプリングで特徴点を生成
     
-    テキストプロンプトでセグメンテーションを実行し、
-    オプティカルフローによる物体トラッキングを実行し、
-    結果を描画して配信する。
+    Args:
+        gray: グレースケール画像
+        mask: マスク画像
+        sampling_step: ピクセル間隔（小さいほど高密度）
+        max_points: 最大点数制限
+        
+    Returns:
+        特徴点配列またはNone
+    """
+    # マスクが有効なピクセルの座標を取得
+    mask_indices = np.where(mask > 0)
+    if len(mask_indices[0]) == 0:
+        return None
     
-    スレッドセーフ設計とメモリ効率を重視した実装。
+    # メモリ効率化: グリッドベースサンプリング
+    h, w = mask.shape
+    points = []
+    
+    # sampling_step間隔でグリッドサンプリング
+    for y in range(0, h, sampling_step):
+        for x in range(0, w, sampling_step):
+            if mask[y, x] > 0:  # マスク内のピクセルのみ
+                points.append([[x, y]])  # OpenCVの形式: [[x, y]]
+                
+                # 点数制限チェック（メモリ保護）
+                if len(points) >= max_points:
+                    return np.array(points, dtype=np.float32)
+    
+    return np.array(points, dtype=np.float32) if points else None
+
+
+class LangSamWithOptFlowNode(Node):
+    """LangSAM + オプティカルフロー統合ノード
+    
+    テキストプロンプトによるセグメンテーションと
+    オプティカルフローによる物体追跡を実行
     """
     
     # すべての設定値はconfig.yamlから読み込み（ハードコーディング排除）
@@ -97,7 +136,7 @@ class OptFlowNode(Node):
                 gc.collect()
     
     def __init__(self):
-        super().__init__('optflow_node')
+        super().__init__('langsam_with_optflow_node')
         
         # コールバックグループの設定
         self._init_callback_groups()
@@ -115,38 +154,17 @@ class OptFlowNode(Node):
         self._init_ros_communication()
         
         self.get_logger().info("LangSAM + Optical Flow Node 起動完了")
-        self.get_logger().info(f"使用するSAMモデル: {self.sam_model}")
-        self.get_logger().info(f"使用するText Prompt: {self.text_prompt}")
         
-        # パラメータ読み込み確認（config.yamlの設定に基づく）
+        # 重要パラメータのみログ出力
         if self.enable_parameter_logging:
-            self._log_parameters()
+            self._log_key_parameters()
     
-    def _log_parameters(self) -> None:
-        """パラメータの読み込み状況をログ出力"""
-        self.get_logger().info("=== パラメータ読み込み確認 ===")
-        self.get_logger().info(f"SAM Model: {self.sam_model}")
-        self.get_logger().info(f"Text Prompt: {self.text_prompt}")
-        self.get_logger().info(f"reset_interval: {self.reset_interval}")
-        self.get_logger().info(f"tracking_targets: {self.tracking_targets}")
-        self.get_logger().info(f"grid_size: {self.grid_size}")
-        self.get_logger().info(f"max_per_cell: {self.max_per_cell}")
-        self.get_logger().info(f"quality_level: {self.quality_level}")
-        self.get_logger().info(f"min_distance: {self.min_distance}")
-        self.get_logger().info(f"block_size: {self.block_size}")
-        self.get_logger().info(f"optical_flow_win_size: {self.optical_flow_win_size}")
-        self.get_logger().info(f"optical_flow_max_level: {self.optical_flow_max_level}")
-        self.get_logger().info("--- メモリ管理パラメータ ---")
-        self.get_logger().info(f"max_tracking_points: {self.max_tracking_points}")
-        self.get_logger().info(f"memory_cleanup_interval: {self.memory_cleanup_interval}")
-        self.get_logger().info("--- CUDA設定パラメータ ---")
-        self.get_logger().info(f"cuda_arch_list: {self.cuda_arch_list}")
-        self.get_logger().info(f"force_cpu_mode: {self.force_cpu_mode}")
-        self.get_logger().info("--- パフォーマンス設定 ---")
-        self.get_logger().info(f"enable_torch_no_grad: {self.enable_torch_no_grad}")
-        self.get_logger().info(f"enable_memory_optimization: {self.enable_memory_optimization}")
-        self.get_logger().info(f"enable_gpu_memory_cleanup: {self.enable_gpu_memory_cleanup}")
-        self.get_logger().info("=== パラメータ確認完了 ===")
+    def _log_key_parameters(self) -> None:
+        """重要パラメータのみログ出力"""
+        self.get_logger().info(f"SAMモデル: {self.sam_model}, リセット間隔: {self.reset_interval}秒")
+        self.get_logger().info(f"閾値設定: box={self.box_threshold}, text={self.text_threshold}")
+        self.get_logger().info(f"高密度サンプリング: {self.enable_dense_sampling}, 最大追跡点数: {self.max_tracking_points}")
+        self.get_logger().info(f"追跡対象: {self.tracking_targets}")
     
     def _validate_parameters(self) -> None:
         """パラメータの妥当性検証"""
@@ -164,6 +182,20 @@ class OptFlowNode(Node):
             
         if self.min_distance < 0:
             validation_errors.append(f"min_distance must be >= 0, got {self.min_distance}")
+            
+        # Dense sampling parameters validation
+        if self.dense_sampling_step <= 0:
+            validation_errors.append(f"dense_sampling_step must be > 0, got {self.dense_sampling_step}")
+            
+        if self.max_dense_points_per_mask <= 0:
+            validation_errors.append(f"max_dense_points_per_mask must be > 0, got {self.max_dense_points_per_mask}")
+            
+        # LangSAM threshold validation
+        if not (0.0 <= self.box_threshold <= 1.0):
+            validation_errors.append(f"box_threshold must be 0.0-1.0, got {self.box_threshold}")
+            
+        if not (0.0 <= self.text_threshold <= 1.0):
+            validation_errors.append(f"text_threshold must be 0.0-1.0, got {self.text_threshold}")
             
         if self.block_size <= 0:
             validation_errors.append(f"block_size must be > 0, got {self.block_size}")
@@ -201,6 +233,8 @@ class OptFlowNode(Node):
         # LangSAM parameters
         self.sam_model = self.get_config_param('sam_model')
         self.text_prompt = self.get_config_param('text_prompt')
+        self.box_threshold = self.get_config_param('box_threshold')
+        self.text_threshold = self.get_config_param('text_threshold')
         
         # Tracking reset parameters
         self.reset_interval = self.get_config_param('reset_interval')
@@ -220,6 +254,12 @@ class OptFlowNode(Node):
         self.quality_level = self.get_config_param('quality_level')
         self.min_distance = self.get_config_param('min_distance')
         self.block_size = self.get_config_param('block_size')
+        
+        # Dense sampling parameters
+        self.enable_dense_sampling = self.get_config_param('enable_dense_sampling')
+        self.dense_sampling_step = self.get_config_param('dense_sampling_step')
+        self.max_dense_points_per_mask = self.get_config_param('max_dense_points_per_mask')
+        
         
         # Tracking visualization parameters
         self.tracking_circle_radius = self.get_config_param('tracking_circle_radius')
@@ -519,9 +559,9 @@ class OptFlowNode(Node):
         
         reset_needed = should_run_sam or force_reset or sam_ready_for_reset
         
-        # デバッグログ（reset_interval動作確認）
-        if should_run_sam and self.frame_count > 0:
-            self.get_logger().info(f"時間ベースreset_interval動作: 経過時間={time_elapsed:.2f}秒, reset_interval={self.reset_interval}秒")
+        # リセット動作ログ（必要時のみ）
+        if should_run_sam and self.frame_count > 0 and self.enable_parameter_logging:
+            self.get_logger().debug(f"時間ベースリセット: {time_elapsed:.1f}秒経過")
         
         # リセット実行時に時刻を更新
         if reset_needed and should_run_sam:
@@ -558,18 +598,31 @@ class OptFlowNode(Node):
         total_points = 0
         # 統合されたマスクから特徴点を抽出
         for label, combined_mask in label_masks.items():
-            points = sample_features_grid(
-                gray, combined_mask, self.grid_size, self.max_per_cell,
-                self.quality_level, self.min_distance, self.block_size
-            )
+            if self.enable_dense_sampling:
+                # 高密度サンプリング
+                points = sample_features_dense(
+                    gray, combined_mask, 
+                    self.dense_sampling_step, 
+                    self.max_dense_points_per_mask
+                )
+                sampling_method = "dense"
+            else:
+                # 従来のグリッドベースサンプリング
+                points = sample_features_grid(
+                    gray, combined_mask, self.grid_size, self.max_per_cell,
+                    self.quality_level, self.min_distance, self.block_size
+                )
+                sampling_method = "grid"
+            
             if points is not None:
                 self.prev_pts_per_label[label] = points
                 total_points += len(points)
-                self.get_logger().info(f"ラベル'{label}': {len(points)}個の特徴点を抽出")
+                if self.enable_parameter_logging:
+                    self.get_logger().info(f"ラベル'{label}': {len(points)}点 ({sampling_method})")
             else:
-                self.get_logger().warn(f"ラベル'{label}': 特徴点が抽出できませんでした")
+                self.get_logger().warn(f"ラベル'{label}': 特徴点抽出失敗")
         
-        self.get_logger().info(f"トラッキングポイント初期化完了: 合計{total_points}点, {len(self.prev_pts_per_label)}ラベル")
+        self.get_logger().info(f"追跡初期化完了: {total_points}点, {len(self.prev_pts_per_label)}ラベル")
         
         # メモリ効率化: 必要な場合のみコピー
         if self.prev_gray is None or self.prev_gray.shape != gray.shape:
@@ -800,13 +853,15 @@ class OptFlowNode(Node):
                 # PyTorchのno_gradでメモリ使用量を削減（config.yamlの設定に基づく）
                 def _run_prediction():
                     try:
-                        return self.model.predict([image_pil], [self.text_prompt])
+                        return self.model.predict([image_pil], [self.text_prompt], 
+                                                  self.box_threshold, self.text_threshold)
                     except RuntimeError as cuda_error:
                         if "No available kernel" in str(cuda_error) or "CUDA" in str(cuda_error):
                             self.get_logger().warn(f"CUDA エラーが発生しました。CPUモードで再試行します: {cuda_error}")
                             # CPUモードで再試行
                             self._force_cpu_mode()
-                            return self.model.predict([image_pil], [self.text_prompt])
+                            return self.model.predict([image_pil], [self.text_prompt], 
+                                                      self.box_threshold, self.text_threshold)
                         else:
                             raise cuda_error
                 
@@ -1143,7 +1198,7 @@ def main(args=None):
     rclpy.init(args=args)
     
     try:
-        node = OptFlowNode()
+        node = LangSamWithOptFlowNode()
         
         # マルチスレッド実行器を使用
         executor = MultiThreadedExecutor(num_threads=4)

@@ -16,17 +16,19 @@ lang_sam_node:
     # ログ設定
     enable_fps_logging: true # FPS情報の表示
 
-optflow_node:
+langsam_with_optflow_node:
   ros__parameters:
     # LangSAM parameters（統合された機能）
     sam_model: "sam2.1_hiera_small"
-    text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."
+    text_prompt: "white line. red pylon. wall. car. building. mobility. road."
+    box_threshold: 0.3  # バウンディングボックス検出閾値
+    text_threshold: 0.3  # テキストマッチング閾値
     
     # トラッキングのリセット間隔（秒）
     reset_interval: 3.0  # セグメンテーション実行間隔（秒単位）
     
     # トラッキング対象の設定
-    tracking_targets: "white line. human. red pylon. car. mobility." # "" → 全てのオブジェクトをトラッキング
+    tracking_targets: "white line. red pylon." # "" → 全てのオブジェクトをトラッキング
     
     # グリッド設定
     grid_size_x: 15
@@ -39,7 +41,7 @@ optflow_node:
     block_size: 3 # 特徴点検出のブロックサイズ（改善: デフォルト値に戻す）
     
     # トラッキング可視化パラメータ
-    tracking_circle_radius: 4 # トラッキング円の半径
+    tracking_circle_radius: 6 # トラッキング円の半径
     tracking_circle_color: 255 # トラッキング円の色
     
     # オプティカルフローパラメータ  
@@ -49,8 +51,13 @@ optflow_node:
     optical_flow_criteria_eps: 0.03 # 収束判定のイプシロン値
     optical_flow_criteria_max_count: 10 # 最大反復回数
     
+    # 密度サンプリング設定
+    enable_dense_sampling: true # 高密度サンプリングの有効化
+    dense_sampling_step: 3 # ピクセル間隔（小さいほど高密度）
+    max_dense_points_per_mask: 50000 # マスクあたりの最大点数
+    
     # メモリ管理パラメータ
-    max_tracking_points: 10000 # 最大トラッキング点数
+    max_tracking_points: 100000 # 最大トラッキング点数（密度サンプリング用に増加）
     memory_cleanup_interval: 100 # メモリクリーンアップ間隔（フレーム数）
     
     # CUDA設定パラメータ
