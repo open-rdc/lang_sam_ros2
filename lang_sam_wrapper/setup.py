@@ -7,6 +7,9 @@ setup(
     name=package_name,
     version='0.0.1',
     packages=find_packages(exclude=['test']),
+    package_data={
+        'lang_sam_wrapper': ['*.py'],
+    },
     data_files=[
     ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
     ('share/' + package_name, ['package.xml']),
@@ -19,6 +22,12 @@ setup(
         'sensor_msgs',
         'cv_bridge',
         'lang_sam',
+        'torch>=1.9.0',
+        'torchvision>=0.10.0',
+        'opencv-python>=4.5.0',
+        'Pillow>=8.0.0',
+        'numpy>=1.19.0',
+        'supervision>=0.6.0',
     ],
     zip_safe=True,
     maintainer='Ryusei Baba',
@@ -27,7 +36,9 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
-            'main = lang_sam_wrapper.main:main',
+            'debug_lang_sam_node = lang_sam_wrapper.debug_lang_segment_anything:main',
+            'langsam_with_optflow_node = lang_sam_wrapper.langsam_with_optflow_node:main',
+            'interpolation_node = lang_sam_wrapper.interpolation_node:main',
         ],
     },
 )
