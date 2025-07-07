@@ -12,8 +12,8 @@
 <div align="center">
   <table>
     <tr>
-      <td><img src="./doc/lang_sam_mask.gif" alt="LangSAM 出力" height="200"></td>
-      <td><img src="./doc/optical_flow.gif" alt="Optical Flow 出力" height="200"></td>
+      <td><img src="./doc/lang_sam_mask.mp4" alt="LangSAM 出力" height="200"></td>
+      <td><img src="./doc/optical_flow.webm" alt="Optical Flow 出力" height="200"></td>
     </tr>
     <tr>
       <td align="center"><b>LangSAM 出力<br>text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."</b></td>
