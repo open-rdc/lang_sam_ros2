@@ -20,7 +20,7 @@ langsam_with_optflow_node:
   ros__parameters:
     # LangSAM parameters（統合された機能）
     sam_model: "sam2.1_hiera_small"
-    text_prompt: "white line. red pylon. wall. car. building. mobility. road."
+    text_prompt: "white line. red pylon. human. wall. car. building. mobility. road."
     box_threshold: 0.3  # バウンディングボックス検出閾値
     text_threshold: 0.3  # テキストマッチング閾値
     
@@ -28,7 +28,7 @@ langsam_with_optflow_node:
     reset_interval: 3.0  # セグメンテーション実行間隔（秒単位）
     
     # トラッキング対象の設定
-    tracking_targets: "white line. red pylon." # "" → 全てのオブジェクトをトラッキング
+    tracking_targets: "white line. red pylon. human. car. mobility." # "" → 全てのオブジェクトをトラッキング
     
     # グリッド設定
     grid_size_x: 15
