@@ -39,6 +39,7 @@ setup(
             'debug_lang_sam_node = lang_sam_wrapper.debug_lang_segment_anything:main',
             'langsam_with_optflow_node = lang_sam_wrapper.langsam_with_optflow_node:main',
             'interpolation_node = lang_sam_wrapper.interpolation_node:main',
+            'new_langsam_optflow_node = lang_sam_wrapper.new_langsam_optflow_node:main',
         ],
     },
 )

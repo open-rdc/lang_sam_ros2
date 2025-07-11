@@ -93,3 +93,31 @@ class SAM:
         scores = [np.squeeze(score) for score in scores]
         logits = [np.squeeze(logit, axis=1) if len(logit.shape) > 3 else logit for logit in logits]
         return masks, scores, logits
+
+    def predict_with_points(
+        self, 
+        image_rgb: np.ndarray, 
+        point_coords: np.ndarray, 
+        point_labels: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Point coordinates入力でのセグメンテーション予測
+        
+        Args:
+            image_rgb: RGB画像 (H, W, 3)
+            point_coords: 点座標 [[x1, y1], [x2, y2], ...] shape: (N, 2)
+            point_labels: 点ラベル [1, 1, ...] (1=前景, 0=背景) shape: (N,)
+            
+        Returns:
+            masks: セグメンテーションマスク
+            scores: 信頼度スコア
+            logits: ロジット値
+        """
+        self.predictor.set_image(image_rgb)
+        masks, scores, logits = self.predictor.predict(
+            point_coords=point_coords,
+            point_labels=point_labels,
+            multimask_output=False
+        )
+        if len(masks.shape) > 3:
+            masks = np.squeeze(masks, axis=1)
+        return masks, scores, logits

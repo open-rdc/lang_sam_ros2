@@ -74,3 +74,59 @@ langsam_with_optflow_node:
     enable_memory_optimization: true # メモリ最適化の有効化
     enable_gpu_memory_cleanup: true # GPU メモリクリーンアップの有効化
 
+# 新しいフロー用パラメータ設定
+new_langsam_optflow_node:
+  ros__parameters:
+    # 基本LangSAMパラメータ
+    sam_model: "sam2.1_hiera_tiny"
+    text_prompt: "white line. red pylon. human. wall. car. building. mobility. road."
+    box_threshold: 0.3
+    text_threshold: 0.2
+    tracking_targets: "white line. red pylon. human. car."  # 空文字列 = すべてのGroundingDINO検出結果をトラッキング
+    
+    # 新フロー用実行間隔パラメータ
+    grounding_dino_interval: 3.0  # GroundingDINO実行間隔（秒）
+    sam2_interval: 0.1  # SAM2実行間隔（秒）
+    enable_sam2_every_frame: false  # SAM2毎フレーム実行
+    
+    # Harris corner検出パラメータ
+    harris_max_corners: 10  # バウンディングボックス内の最大特徴点数
+    harris_quality_level: 0.01  # Harris corner品質レベル
+    harris_min_distance: 10  # Harris corner間の最小距離
+    harris_block_size: 3  # Harris corner検出ブロックサイズ
+    harris_k: 0.04  # Harris検出器のkパラメータ
+    use_harris_detector: true  # Harris検出器使用（false=Shi-Tomasi）
+    
+    # 特徴点選択パラメータ
+    feature_selection_method: "center_point"  # 特徴点選択方法（center_point, harris_response, edge_centroid, center_closest, random）
+    
+    # エッジ検出パラメータ
+    canny_low_threshold: 50   # Canny edge検出の低閾値
+    canny_high_threshold: 150 # Canny edge検出の高閾値
+    min_edge_pixels: 10       # 有効とみなす最小エッジピクセル数
+    
+    # オプティカルフローパラメータ
+    optical_flow_win_size_x: 30  # オプティカルフローウィンドウサイズX
+    optical_flow_win_size_y: 30  # オプティカルフローウィンドウサイズY
+    optical_flow_max_level: 5  # ピラミッドの最大レベル
+    optical_flow_criteria_eps: 0.03  # 収束判定のイプシロン値
+    optical_flow_criteria_max_count: 20  # 最大反復回数
+    
+    # 追跡検証パラメータ
+    max_displacement: 50.0  # 最大変位閾値（ピクセル）
+    min_valid_ratio: 0.5  # 有効な追跡点の最小割合
+    
+    # CUDA設定パラメータ
+    cuda_arch_list: "6.0;6.1;7.0;7.5;8.0;8.6"
+    force_cpu_mode: false
+    
+    # パフォーマンス設定
+    enable_torch_no_grad: true
+    enable_memory_optimization: true
+    enable_gpu_memory_cleanup: true
+    
+    # ログ設定
+    enable_parameter_logging: true
+    enable_fps_logging: true
+    log_level_override: ""
+
