@@ -173,6 +173,8 @@ class NewLangSamOptFlowNode(Node):
         with self.detection_data_lock:
             self.latest_detection_data: Optional[Dict] = None
             self.detection_updated = False
+            self.latest_grounding_dino_result: Optional[Dict] = None
+            self.grounding_dino_updated = False
             
         with self.tracking_data_lock:
             self.prev_gray: Optional[np.ndarray] = None
@@ -216,6 +218,10 @@ class NewLangSamOptFlowNode(Node):
         )
         self.optflow_image_pub = self.create_publisher(
             ROSImage, '/image_optflow', 10,
+            callback_group=self.publisher_callback_group
+        )
+        self.grounding_dino_image_pub = self.create_publisher(
+            ROSImage, '/image_grounding_dino', 10,
             callback_group=self.publisher_callback_group
         )
         self.sam_masks_pub = self.create_publisher(
@@ -295,7 +301,7 @@ class NewLangSamOptFlowNode(Node):
         self.get_logger().info(f"GroundingDINO間隔: {self.grounding_dino_interval}秒")
         self.get_logger().info(f"SAM2間隔: {self.sam2_interval}秒 (毎フレーム: {self.enable_sam2_every_frame})")
         self.get_logger().info(f"オプティカルフロー: バウンディングボックス中心点で追跡")
-        self.get_logger().info(f"SAM2入力: バウンディングボックス中心点")
+        self.get_logger().info(f"SAM2入力: オプティカルフローで追跡されたバウンディングボックス")
         self.get_logger().info(f"追跡対象: {self.tracking_targets}")
     
     def image_callback(self, msg: ROSImage) -> None:
@@ -322,10 +328,15 @@ class NewLangSamOptFlowNode(Node):
                 self.get_logger().info(f"フレーム {self.frame_count} 処理開始")
             
             # 1. GroundingDINO検出（定期実行、同期処理でマスク位置合わせ保証）
-            if self._should_run_grounding_dino(current_time):
+            should_run_gdino = self._should_run_grounding_dino(current_time)
+            if should_run_gdino:
                 self.get_logger().info("GroundingDINO検出を実行（同期）")
                 self._run_grounding_dino_detection_sync(image_cv)
                 self.last_grounding_dino_time = current_time
+            else:
+                if self.frame_count % 100 == 0:  # 100フレームごとに状況をログ
+                    time_since_last = current_time - self.last_grounding_dino_time
+                    self.get_logger().info(f"GroundingDINO検出をスキップ: 前回から{time_since_last:.2f}秒経過, 間隔設定{self.grounding_dino_interval}秒")
             
             # 2. バウンディングボックス追跡（同期処理でマスク位置合わせ保証）
             if self.detection_updated:
@@ -396,7 +407,19 @@ class NewLangSamOptFlowNode(Node):
                     
                     num_detections = len(self.latest_detection_data.get('boxes', []))
                     labels = self.latest_detection_data.get('labels', [])
+                    scores = self.latest_detection_data.get('scores', [])
                     self.get_logger().info(f"GroundingDINO検出: {num_detections}個, ラベル: {labels}")
+                    
+                    # GroundingDINO検出結果の可視化用データを保存
+                    self.latest_grounding_dino_result = {
+                        'image': image_cv.copy(),
+                        'boxes': self.latest_detection_data.get('boxes', []),
+                        'labels': self.latest_detection_data.get('labels', []),
+                        'scores': self.latest_detection_data.get('scores', [])
+                    }
+                    self.grounding_dino_updated = True
+                    
+                    self.get_logger().info(f"GroundingDINO可視化データ保存完了: boxes={len(self.latest_grounding_dino_result['boxes'])}, labels={len(self.latest_grounding_dino_result['labels'])}, scores={len(self.latest_grounding_dino_result['scores'])}")
                 else:
                     self.get_logger().warn("GroundingDINO検出結果が空です")
                     
@@ -560,18 +583,21 @@ class NewLangSamOptFlowNode(Node):
             self.get_logger().error(f"オプティカルフロー追跡エラー: {repr(e)}")
             self.tracking_valid = False
     
-    def _run_sam2_segmentation_optimized(self, image_cv: np.ndarray, points_data: Dict) -> Dict:
-        """最適化されたSAM2セグメンテーション実行 (ポイント入力版)"""
+    def _run_sam2_segmentation_optimized(self, image_cv: np.ndarray, boxes_data: Dict) -> Dict:
+        """最適化されたSAM2セグメンテーション実行 (バウンディングボックス入力版)"""
         try:
             if self.sam_model_instance is None:
                 self.get_logger().warn("SAM2モデルが初期化されていません")
                 return None
                 
-            all_points = points_data['points']
-            all_labels = points_data['labels']
+            all_boxes = boxes_data['boxes']
+            all_labels = boxes_data['labels']
             
-            if not all_points:
+            if not all_boxes:
                 return None
+            
+            # NumPy配列に変換
+            boxes_array = np.array(all_boxes, dtype=np.float32)
             
             # GPU最適化: torch.no_grad()とメモリ効率化
             with torch.no_grad():
@@ -583,19 +609,10 @@ class NewLangSamOptFlowNode(Node):
                 scores_list = []
                 logits_list = []
                 
-                for point in all_points:
-                    # 特徴点座標を取得
-                    if len(point.shape) == 3:  # (1, 1, 2)形式の場合
-                        point_coords = point.reshape(1, -1)  # (1, 2)に変換
-                    else:
-                        point_coords = np.array([[point[0], point[1]]], dtype=np.float32)
-                    
-                    point_labels = np.array([1], dtype=np.int32)  # 前景点として設定
-                    
-                    # SAM2のpoint_coords入力で推論
+                for box in boxes_array:
+                    # 各バウンディングボックスに対してSAM2を実行
                     masks, scores, logits = self.sam_model_instance.predictor.predict(
-                        point_coords=point_coords,
-                        point_labels=point_labels,
+                        box=box.reshape(1, -1),  # SAM2は(1, 4)形式を期待
                         multimask_output=False
                     )
                     
@@ -621,7 +638,7 @@ class NewLangSamOptFlowNode(Node):
                 'scores': combined_scores,
                 'logits': combined_logits,
                 'labels': all_labels,
-                'points': all_points
+                'boxes': boxes_array
             }
                 
         except Exception as e:
@@ -630,23 +647,23 @@ class NewLangSamOptFlowNode(Node):
     
     
     def _run_sam2_segmentation(self, image_cv: np.ndarray) -> None:
-        """SAM2セグメンテーション実行（同期処理、中心点入力版）"""
+        """SAM2セグメンテーション実行（同期処理、バウンディングボックス入力版）"""
         try:
             with self.tracking_data_lock:
-                if not self.tracked_centers_per_label:
+                if not self.tracked_boxes_per_label:
                     return
                 
-                # 現在の追跡中心点データを取得
-                centers_data = {
-                    'points': [center for center in self.tracked_centers_per_label.values() if center is not None],
-                    'labels': [label for label, center in self.tracked_centers_per_label.items() if center is not None]
+                # 現在の追跡バウンディングボックスデータを取得
+                boxes_data = {
+                    'boxes': [box for box in self.tracked_boxes_per_label.values() if box is not None],
+                    'labels': [label for label, box in self.tracked_boxes_per_label.items() if box is not None]
                 }
                 
-                if not centers_data['points']:
+                if not boxes_data['boxes']:
                     return
             
-            # SAM2処理を同期実行（中心点入力）
-            result = self._run_sam2_segmentation_optimized(image_cv, centers_data)
+            # SAM2処理を同期実行（バウンディングボックス入力）
+            result = self._run_sam2_segmentation_optimized(image_cv, boxes_data)
             
             if result:
                 # 結果を保存
@@ -654,7 +671,7 @@ class NewLangSamOptFlowNode(Node):
                     self.latest_sam_masks = result
                     self.sam_updated = True
                     
-                    self.get_logger().info(f"SAM2セグメンテーション完了: {len(result['masks'])}個のマスク（中心点入力）")
+                    self.get_logger().info(f"SAM2セグメンテーション完了: {len(result['masks'])}個のマスク（バウンディングボックス入力）")
                 
         except Exception as e:
             self.get_logger().error(f"SAM2セグメンテーションエラー: {repr(e)}")
@@ -676,17 +693,34 @@ class NewLangSamOptFlowNode(Node):
             with self.sam_data_lock:
                 sam_data = dict(self.latest_sam_masks) if self.latest_sam_masks else None
             
+            with self.detection_data_lock:
+                grounding_dino_data = dict(self.latest_grounding_dino_result) if self.latest_grounding_dino_result else None
+                grounding_dino_updated = self.grounding_dino_updated
+                # フラグリセットは可視化後に行うため、ここではリセットしない
+                
+                if grounding_dino_data:
+                    self.get_logger().info(f"GroundingDINO可視化データ準備: updated={grounding_dino_updated}, boxes_count={len(grounding_dino_data.get('boxes', []))}")
+                else:
+                    self.get_logger().debug("GroundingDINO可視化データなし")
+            
             # 非同期で可視化処理を開始
             self.visualization_future = self.background_executor.submit(
-                self._visualization_worker, image_cv.copy(), tracking_data, sam_data
+                self._visualization_worker, image_cv.copy(), tracking_data, sam_data, grounding_dino_data, grounding_dino_updated
             )
                 
         except Exception as e:
             self.get_logger().error(f"結果配信エラー: {repr(e)}")
     
-    def _visualization_worker(self, image_cv: np.ndarray, tracking_data: Dict, sam_data: Optional[Dict]) -> None:
+    def _visualization_worker(self, image_cv: np.ndarray, tracking_data: Dict, sam_data: Optional[Dict], grounding_dino_data: Optional[Dict], grounding_dino_updated: bool) -> None:
         """可視化処理ワーカー (別スレッドで実行)"""
         try:
+            # GroundingDINO検出結果の可視化（データがあれば常に可視化）
+            if grounding_dino_data:
+                self.get_logger().info("GroundingDINO可視化ワーカー開始")
+                self._publish_grounding_dino_result_worker(grounding_dino_data)
+            else:
+                self.get_logger().debug("grounding_dino_dataがNoneのため可視化をスキップ")
+            
             # オプティカルフロー結果の可視化
             self._publish_optical_flow_result_worker(image_cv, tracking_data)
             
@@ -703,6 +737,102 @@ class NewLangSamOptFlowNode(Node):
             
         except Exception as e:
             self.get_logger().error(f"可視化ワーカーエラー: {repr(e)}")
+    
+    def _publish_grounding_dino_result_worker(self, grounding_dino_data: Dict) -> None:
+        """GroundingDINO検出結果の可視化・配信（ワーカー版）"""
+        try:
+            self.get_logger().info("GroundingDINO可視化メソッド開始")
+            
+            image_cv = grounding_dino_data['image']
+            boxes = grounding_dino_data['boxes']
+            labels = grounding_dino_data['labels']
+            scores = grounding_dino_data['scores']
+            
+            self.get_logger().info(f"GroundingDINO可視化データ: image_shape={image_cv.shape}, boxes_count={len(boxes)}, labels_count={len(labels)}, scores_count={len(scores)}")
+            
+            if len(boxes) == 0:
+                self.get_logger().warn("GroundingDINO可視化: バウンディングボックスが空のため処理をスキップ")
+                return
+            
+            # バウンディングボックス情報をNumPy配列に変換
+            boxes_array = []
+            scores_array = []
+            
+            for i, bbox in enumerate(boxes):
+                if hasattr(bbox, 'cpu'):  # PyTorch tensor の場合
+                    bbox_list = bbox.cpu().numpy().tolist()
+                else:
+                    bbox_list = list(bbox)
+                boxes_array.append(bbox_list)
+                
+                # スコアを取得
+                if i < len(scores):
+                    if hasattr(scores[i], 'cpu'):
+                        score = scores[i].cpu().numpy().item()
+                    else:
+                        score = float(scores[i])
+                    scores_array.append(score)
+                else:
+                    scores_array.append(1.0)  # デフォルトスコア
+            
+            boxes_np = np.array(boxes_array, dtype=np.float32)
+            scores_np = np.array(scores_array, dtype=np.float32)
+            
+            self.get_logger().info(f"GroundingDINO可視化配列: boxes_np.shape={boxes_np.shape}, scores_np.shape={scores_np.shape}, labels={labels}")
+            
+            # OpenCVで直接バウンディングボックスを描画（マスクなし）
+            annotated_image = image_cv.copy()
+            
+            for i, (box, score, label) in enumerate(zip(boxes_np, scores_np, labels)):
+                x1, y1, x2, y2 = box.astype(int)
+                
+                # バウンディングボックスを描画（緑色）
+                cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                
+                # ラベルとスコアを描画
+                label_text = f"{label}: {score:.2f}"
+                
+                # テキストサイズを計算
+                (text_width, text_height), baseline = cv2.getTextSize(
+                    label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+                )
+                
+                # ラベル背景を描画
+                cv2.rectangle(
+                    annotated_image,
+                    (x1, y1 - text_height - 5),
+                    (x1 + text_width, y1),
+                    (0, 255, 0),
+                    -1
+                )
+                
+                # ラベルテキストを描画
+                cv2.putText(
+                    annotated_image,
+                    label_text,
+                    (x1, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 0, 0),
+                    1
+                )
+            
+            self.get_logger().info(f"GroundingDINO可視化画像生成完了: annotated_image.shape={annotated_image.shape}")
+            
+            # ROS メッセージとして配信
+            ros_msg = self.bridge.cv2_to_imgmsg(annotated_image, encoding='rgb8')
+            ros_msg.header.stamp = self.get_clock().now().to_msg()
+            ros_msg.header.frame_id = 'camera_frame'
+            self.grounding_dino_image_pub.publish(ros_msg)
+            
+            self.get_logger().info("GroundingDINO可視化画像配信完了")
+            
+            self.get_logger().info(f"GroundingDINO検出結果配信完了: {len(boxes)}個のバウンディングボックス")
+                
+        except Exception as e:
+            self.get_logger().error(f"GroundingDINO結果配信エラー: {repr(e)}")
+            import traceback
+            self.get_logger().error(f"トレースバック: {traceback.format_exc()}")
     
     def _publish_optical_flow_result_worker(self, image_cv: np.ndarray, tracking_data: Dict) -> None:
         """オプティカルフロー結果の可視化・配信 (バウンディングボックス表示)"""
@@ -758,28 +888,18 @@ class NewLangSamOptFlowNode(Node):
             self.get_logger().error(f"トレースバック: {traceback.format_exc()}")
     
     def _publish_sam2_result_worker(self, image_cv: np.ndarray, sam_data: Dict) -> None:
-        """SAM2セグメンテーション結果の可視化・配信（ワーカー版、ポイント入力版）"""
+        """SAM2セグメンテーション結果の可視化・配信（ワーカー版、バウンディングボックス入力版）"""
         try:
             masks = sam_data['masks']
             labels = sam_data['labels']
             scores = sam_data['scores']
-            points = sam_data['points']
+            boxes = sam_data['boxes']
             
-            # 中心点から仮のバウンディングボックスを生成（可視化のため）
-            dummy_boxes = []
-            for point in points:
-                if len(point.shape) == 3:  # (1, 1, 2)形式
-                    x, y = point[0, 0]
-                else:
-                    x, y = point[0], point[1]
-                # 中心点周りに20x20ピクセルのボックスを作成
-                dummy_boxes.append([x-10, y-10, x+10, y+10])
-            
-            # draw_imageを使用して可視化
+            # draw_imageを使用して可視化（実際のバウンディングボックスを使用）
             annotated_image = draw_image(
                 image_rgb=image_cv,
                 masks=np.array(masks),
-                xyxy=np.array(dummy_boxes) if dummy_boxes else np.array([]),
+                xyxy=boxes,
                 probs=scores,
                 labels=labels
             )
@@ -863,7 +983,7 @@ class NewLangSamOptFlowNode(Node):
                 masks = self.latest_sam_masks['masks']
                 labels = self.latest_sam_masks['labels']
                 scores = self.latest_sam_masks['scores']
-                points = self.latest_sam_masks['points']
+                boxes = self.latest_sam_masks['boxes']
                 
                 self.get_logger().info(f"SAM2結果詳細: マスク数={len(masks)}, ラベル数={len(labels)}, スコア数={len(scores)}")
                 
@@ -884,21 +1004,11 @@ class NewLangSamOptFlowNode(Node):
                     else:
                         scores = scores[:len(masks)]
                 
-                # 中心点から仮のバウンディングボックスを生成（可視化のため）
-                dummy_boxes = []
-                for point in points:
-                    if len(point.shape) == 3:  # (1, 1, 2)形式
-                        x, y = point[0, 0]
-                    else:
-                        x, y = point[0], point[1]
-                    # 中心点周りに20x20ピクセルのボックスを作成
-                    dummy_boxes.append([x-10, y-10, x+10, y+10])
-                
-                # draw_imageを使用して可視化
+                # draw_imageを使用して可視化（実際のバウンディングボックスを使用）
                 annotated_image = draw_image(
                     image_rgb=image_cv,
                     masks=np.array(masks),
-                    xyxy=np.array(dummy_boxes) if dummy_boxes else np.array([]),
+                    xyxy=boxes,
                     probs=scores,
                     labels=labels
                 )

@@ -35,6 +35,7 @@ def generate_launch_description():
                 ('/image_sam', '/image_sam'),
                 ('/sam_masks', '/sam_masks'),
                 ('/image_optflow', '/image_optflow'),
+                ('/image_grounding_dino', '/image_grounding_dino'),
             ],
         ),
         # デバッグ用LangSAMノード（必要に応じてコメントアウト解除）

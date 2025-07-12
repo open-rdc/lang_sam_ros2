@@ -78,14 +78,14 @@ langsam_with_optflow_node:
 new_langsam_optflow_node:
   ros__parameters:
     # 基本LangSAMパラメータ
-    sam_model: "sam2.1_hiera_tiny"
+    sam_model: "sam2.1_hiera_small"
     text_prompt: "white line. red pylon. human. wall. car. building. mobility. road."
     box_threshold: 0.3
     text_threshold: 0.2
     tracking_targets: "white line. red pylon. human. car."  # 空文字列 = すべてのGroundingDINO検出結果をトラッキング
     
     # 新フロー用実行間隔パラメータ
-    grounding_dino_interval: 3.0  # GroundingDINO実行間隔（秒）
+    grounding_dino_interval: 1.0  # GroundingDINO実行間隔（秒）
     sam2_interval: 0.1  # SAM2実行間隔（秒）
     enable_sam2_every_frame: false  # SAM2毎フレーム実行
     
