@@ -179,8 +179,10 @@ class NewLangSamOptFlowNode(Node):
         with self.tracking_data_lock:
             self.prev_gray: Optional[np.ndarray] = None
             self.tracked_boxes_per_label: Dict[str, List[float]] = {}  # バウンディングボックス追跡用
-            self.tracked_centers_per_label: Dict[str, np.ndarray] = {}  # 中心点追跡用
+            self.tracked_centers_per_label: Dict[str, np.ndarray] = {}  # 中心点追跡用（互換性のため残す）
+            self.tracked_features_per_label: Dict[str, np.ndarray] = {}  # 複数特徴点追跡用
             self.original_box_sizes: Dict[str, Tuple[float, float]] = {}  # 初期バウンディングボックスサイズ (width, height)
+            self.feature_to_center_offsets: Dict[str, np.ndarray] = {}  # 特徴点と中心点の相対距離 (N, 2)
             self.tracking_valid = False
             
         with self.sam_data_lock:
@@ -446,7 +448,9 @@ class NewLangSamOptFlowNode(Node):
             with self.tracking_data_lock:
                 self.tracked_boxes_per_label = {}
                 self.tracked_centers_per_label = {}
+                self.tracked_features_per_label = {}
                 self.original_box_sizes = {}
+                self.feature_to_center_offsets = {}
                 
                 # ラベルの重複をカウントするための辞書
                 label_counts = {}
@@ -475,23 +479,59 @@ class NewLangSamOptFlowNode(Node):
                     else:
                         bbox_list = list(bbox)
                     
+                    # バウンディングボックス内の複数特徴点を抽出
+                    feature_points = extract_harris_corners_from_bbox(
+                        gray,
+                        bbox_list,
+                        self.harris_max_corners,
+                        self.harris_quality_level,
+                        self.harris_min_distance,
+                        self.harris_block_size,
+                        self.harris_k,
+                        self.use_harris_detector
+                    )
+                    
                     # バウンディングボックスの中心点を計算
                     x1, y1, x2, y2 = bbox_list
                     center_x = (x1 + x2) / 2
                     center_y = (y1 + y2) / 2
                     center_point = np.array([[[center_x, center_y]]], dtype=np.float32)
                     
+                    if feature_points is not None and len(feature_points) > 0:
+                        self.tracked_features_per_label[unique_label] = feature_points
+                        self.tracked_centers_per_label[unique_label] = center_point
+                        
+                        # 特徴点と中心点の相対距離を計算して保存
+                        offsets = []
+                        for feature_point in feature_points:
+                            fx, fy = feature_point[0]  # (1, 2) -> (2,)
+                            offset_x = fx - center_x
+                            offset_y = fy - center_y
+                            offsets.append([offset_x, offset_y])
+                        
+                        self.feature_to_center_offsets[unique_label] = np.array(offsets, dtype=np.float32)
+                        
+                        self.get_logger().info(f"ラベル'{unique_label}': {len(feature_points)}個の特徴点を検出、相対距離を記録")
+                    else:
+                        # 特徴点が見つからない場合は中心点のみ使用
+                        center_point = np.array([[[center_x, center_y]]], dtype=np.float32)
+                        self.tracked_features_per_label[unique_label] = center_point
+                        self.tracked_centers_per_label[unique_label] = center_point
+                        self.feature_to_center_offsets[unique_label] = np.array([[0.0, 0.0]], dtype=np.float32)  # オフセットなし
+                        
+                        self.get_logger().warn(f"ラベル'{unique_label}': 特徴点検出失敗、中心点を使用")
+                    
                     # 元のバウンディングボックスサイズを保存
+                    x1, y1, x2, y2 = bbox_list
                     width = x2 - x1
                     height = y2 - y1
                     self.original_box_sizes[unique_label] = (width, height)
                     
-                    # バウンディングボックスと中心点を保存（ユニークキー使用）
+                    # バウンディングボックスを保存（ユニークキー使用）
                     self.tracked_boxes_per_label[unique_label] = bbox_list
-                    self.tracked_centers_per_label[unique_label] = center_point
                     
-                    method_name = "中心点"
-                    self.get_logger().info(f"ラベル'{unique_label}': ボックス{bbox_list}, {method_name}点({center_x:.1f}, {center_y:.1f}), サイズ({width:.1f}×{height:.1f})")
+                    method_name = f"特徴点({len(self.tracked_features_per_label[unique_label])}個)"
+                    self.get_logger().info(f"ラベル'{unique_label}': ボックス{bbox_list}, {method_name}, サイズ({width:.1f}×{height:.1f})")
                 
                 # 前フレームのグレー画像を保存
                 self.prev_gray = gray.copy()
@@ -535,49 +575,89 @@ class NewLangSamOptFlowNode(Node):
             return None
     
     def _track_optical_flow(self, gray: np.ndarray) -> None:
-        """オプティカルフローによるバウンディングボックス中心点追跡"""
+        """オプティカルフローによる複数特徴点追跡"""
         try:
             with self.tracking_data_lock:
-                if not self.tracked_centers_per_label or self.prev_gray is None:
+                if not self.tracked_features_per_label or self.prev_gray is None:
                     return
                 
+                updated_features = {}
                 updated_centers = {}
                 updated_boxes = {}
                 
-                for label, prev_center in self.tracked_centers_per_label.items():
-                    if prev_center is None:
+                for label, prev_features in self.tracked_features_per_label.items():
+                    if prev_features is None or len(prev_features) == 0:
                         continue
                     
-                    # オプティカルフロー計算
-                    curr_center, status, _ = cv2.calcOpticalFlowPyrLK(
-                        self.prev_gray, gray, prev_center, None,
+                    # オプティカルフロー計算（複数特徴点）
+                    curr_features, status, _ = cv2.calcOpticalFlowPyrLK(
+                        self.prev_gray, gray, prev_features, None,
                         winSize=self.optical_flow_win_size,
                         maxLevel=self.optical_flow_max_level,
                         criteria=self.optical_flow_criteria
                     )
                     
-                    if curr_center is not None and status is not None and status[0] == 1:
-                        # 追跡された中心点を更新
-                        updated_centers[label] = curr_center
-                        
-                        # バウンディングボックスを更新
-                        updated_box = self._update_bounding_box_from_center(label, curr_center[0, 0])
-                        if updated_box is not None:
-                            updated_boxes[label] = updated_box
-                        
-                        new_x, new_y = curr_center[0, 0]
-                        if label in self.original_box_sizes:
-                            width, height = self.original_box_sizes[label]
-                            self.get_logger().debug(f"ラベル'{label}': 中心点追跡成功 ({new_x:.1f}, {new_y:.1f}), 保持サイズ({width:.1f}×{height:.1f})")
+                    if curr_features is not None and status is not None:
+                        # 有効な特徴点のみを選択
+                        valid_indices = status.flatten() == 1
+                        if np.any(valid_indices):
+                            valid_features = curr_features[valid_indices]
+                            
+                            # 有効な特徴点がある場合
+                            if len(valid_features) > 0:
+                                # 相対距離情報を取得
+                                if label in self.feature_to_center_offsets:
+                                    original_offsets = self.feature_to_center_offsets[label]
+                                    valid_offsets = original_offsets[valid_indices]
+                                    
+                                    # 各特徴点から相対距離を使って中心点を逆算
+                                    predicted_centers = []
+                                    for i, feature in enumerate(valid_features):
+                                        fx, fy = feature[0]  # (1, 2) -> (2,)
+                                        offset_x, offset_y = valid_offsets[i]
+                                        predicted_center_x = fx - offset_x
+                                        predicted_center_y = fy - offset_y
+                                        predicted_centers.append([predicted_center_x, predicted_center_y])
+                                    
+                                    # 予測された中心点の平均を最終的な中心点とする
+                                    predicted_centers = np.array(predicted_centers)
+                                    final_center_x = np.mean(predicted_centers[:, 0])
+                                    final_center_y = np.mean(predicted_centers[:, 1])
+                                    
+                                    new_center = np.array([[[final_center_x, final_center_y]]], dtype=np.float32)
+                                    
+                                    # バウンディングボックスを更新（元のサイズを保持）
+                                    updated_box = self._update_bounding_box_from_center(label, [final_center_x, final_center_y])
+                                    if updated_box is not None:
+                                        updated_features[label] = valid_features
+                                        updated_centers[label] = new_center
+                                        updated_boxes[label] = updated_box
+                                        
+                                        # 有効なオフセットも更新
+                                        self.feature_to_center_offsets[label] = valid_offsets
+                                        
+                                        valid_count = len(valid_features)
+                                        if label in self.original_box_sizes:
+                                            width, height = self.original_box_sizes[label]
+                                            self.get_logger().debug(f"ラベル'{label}': {valid_count}個の特徴点追跡成功, 中心({final_center_x:.1f}, {final_center_y:.1f}), サイズ({width:.1f}×{height:.1f})")
+                                        else:
+                                            self.get_logger().debug(f"ラベル'{label}': {valid_count}個の特徴点追跡成功, 中心({final_center_x:.1f}, {final_center_y:.1f})")
+                                    else:
+                                        self.get_logger().warn(f"ラベル'{label}': バウンディングボックス更新失敗")
+                                else:
+                                    self.get_logger().warn(f"ラベル'{label}': 相対距離情報が見つかりません")
+                            else:
+                                self.get_logger().warn(f"ラベル'{label}': 有効な特徴点なし")
                         else:
-                            self.get_logger().debug(f"ラベル'{label}': 中心点追跡成功 ({new_x:.1f}, {new_y:.1f})")
+                            self.get_logger().warn(f"ラベル'{label}': 全特徴点追跡失敗")
                     else:
-                        self.get_logger().warn(f"ラベル'{label}': 中心点追跡失敗")
+                        self.get_logger().warn(f"ラベル'{label}': オプティカルフロー計算失敗")
                 
+                self.tracked_features_per_label = updated_features
                 self.tracked_centers_per_label = updated_centers
                 self.tracked_boxes_per_label = updated_boxes
                 self.prev_gray = gray.copy()
-                self.tracking_valid = len(self.tracked_centers_per_label) > 0
+                self.tracking_valid = len(self.tracked_features_per_label) > 0
                 
         except Exception as e:
             self.get_logger().error(f"オプティカルフロー追跡エラー: {repr(e)}")
@@ -687,7 +767,8 @@ class NewLangSamOptFlowNode(Node):
             with self.tracking_data_lock:
                 tracking_data = {
                     'tracked_boxes_per_label': dict(self.tracked_boxes_per_label),
-                    'tracked_centers_per_label': {k: v.copy() for k, v in self.tracked_centers_per_label.items()}
+                    'tracked_centers_per_label': {k: v.copy() for k, v in self.tracked_centers_per_label.items()},
+                    'tracked_features_per_label': {k: v.copy() for k, v in self.tracked_features_per_label.items()}
                 }
             
             with self.sam_data_lock:
