@@ -1,8 +1,17 @@
+#!/usr/bin/env python3
+"""
+最適化されたLangSAM + オプティカルフロー統合launchファイル
+テキストプロンプト → GroundingDINO → 複数特徴点追跡 → SAM2セグメンテーション
+"""
+
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
-from launch_ros.substitutions import FindPackageShare
+from ament_index_python.packages import get_package_share_directory
 import os
+from launch_ros.substitutions import FindPackageShare
+
 
 def generate_launch_description():
     # パッケージ内のconfig.yamlファイルのパスを取得
@@ -14,7 +23,7 @@ def generate_launch_description():
 
     # ノードの定義とLaunchDescriptionの生成
     return LaunchDescription([
-        # 統合されたLangSAM + Optical Flowノード
+        # 最適化されたLangSAM + Optical Flowノード
         Node(
             package='lang_sam_wrapper',
             executable='langsam_with_optflow_node',
@@ -26,19 +35,8 @@ def generate_launch_description():
                 ('/image_sam', '/image_sam'),
                 ('/sam_masks', '/sam_masks'),
                 ('/image_optflow', '/image_optflow'),
+                ('/image_grounding_dino', '/image_grounding_dino'),
             ],
-        ),
-        # InterpolationNode - トラッキング結果の表示
-        Node(
-            package='lang_sam_wrapper',
-            executable='interpolation_node',
-            name='interpolation_node',
-            output='screen',
-            parameters=[{
-                'input_topic': '/image_optflow_features',
-                'output_topic': '/sam_masks_interpolated',
-                'image_topic': '/zed/zed_node/rgb/image_rect_color',
-            }],
         ),
         # デバッグ用LangSAMノード（必要に応じてコメントアウト解除）
         # Node(
