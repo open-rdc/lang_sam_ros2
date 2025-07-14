@@ -138,6 +138,12 @@ class LangSamWithOptFlowNode(Node):
         # SAM2パラメータ
         self.sam_model = self.get_config_param('sam_model', 'sam2.1_hiera_small')
         
+        # 非同期処理設定
+        self.enable_async_grounding_dino = self.get_config_param('enable_async_grounding_dino', True)
+        self.enable_async_sam2 = self.get_config_param('enable_async_sam2', True)
+        self.enable_parallel_feature_processing = self.get_config_param('enable_parallel_feature_processing', True)
+        self.feature_processing_workers = self.get_config_param('feature_processing_workers', 4)
+        
         # オプティカルフロー criteria
         self.optical_flow_criteria = (
             cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
@@ -188,9 +194,24 @@ class LangSamWithOptFlowNode(Node):
             self.latest_sam_masks: Optional[Dict] = None
             self.sam_updated = False
         
-        # 非同期処理用（可視化のみ）
+        # 非同期処理用
         self.background_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="Visualization")
         self.visualization_future = None
+        
+        # GroundingDINO非同期処理用
+        self.gdino_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="GroundingDINO")
+        self.gdino_future = None
+        self.gdino_processing = False
+        
+        # SAM2非同期処理用
+        self.sam2_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="SAM2")
+        self.sam2_future = None
+        self.sam2_processing = False
+        self.sam2_pending_data = None
+        
+        # 特徴点処理並列化用
+        self.feature_executor = ThreadPoolExecutor(max_workers=self.feature_processing_workers, thread_name_prefix="FeatureProcessing")
+        self.optical_flow_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="OpticalFlow")
         
         # 性能計測用
         self.performance_stats = {
@@ -211,6 +232,14 @@ class LangSamWithOptFlowNode(Node):
         try:
             if hasattr(self, 'background_executor'):
                 self.background_executor.shutdown(wait=True)
+            if hasattr(self, 'gdino_executor'):
+                self.gdino_executor.shutdown(wait=True)
+            if hasattr(self, 'sam2_executor'):
+                self.sam2_executor.shutdown(wait=True)
+            if hasattr(self, 'feature_executor'):
+                self.feature_executor.shutdown(wait=True)
+            if hasattr(self, 'optical_flow_executor'):
+                self.optical_flow_executor.shutdown(wait=True)
         except Exception:
             pass
     
@@ -333,13 +362,14 @@ class LangSamWithOptFlowNode(Node):
             if self.frame_count % 100 == 0 and self.frame_count > 0:
                 self.get_logger().info(f"フレーム {self.frame_count} 処理中")
             
-            # 1. GroundingDINO検出（最適化版）
+            # 1. GroundingDINO検出（非同期版）
+            self._check_grounding_dino_results()  # 完了した非同期処理の結果を確認
             should_run_gdino = self._should_run_grounding_dino(current_time)
             if should_run_gdino:
                 gdino_start = time.time()
                 if self.frame_count % 30 == 0:
-                    self.get_logger().info("GroundingDINO検出を実行")
-                self._run_grounding_dino_detection_sync(image_cv)
+                    self.get_logger().info("GroundingDINO検出を非同期実行")
+                self._run_grounding_dino_detection_async(image_cv)
                 self.last_grounding_dino_time = current_time
                 self.performance_stats['gdino_times'].append(time.time() - gdino_start)
             else:
@@ -358,13 +388,14 @@ class LangSamWithOptFlowNode(Node):
                 self._track_optical_flow(gray)
             self.performance_stats['optflow_times'].append(time.time() - optflow_start)
             
-            # 3. SAM2セグメンテーション（最適化版）
+            # 3. SAM2セグメンテーション（非同期版）
+            self._check_sam2_results()  # 完了した非同期処理の結果を確認
             should_run_sam2 = self._should_run_sam2(current_time)
             if should_run_sam2 and self.tracking_valid:
                 sam2_start = time.time()
                 if self.frame_count % 30 == 0:
-                    self.get_logger().info("SAM2セグメンテーション実行")
-                self._run_sam2_segmentation(image_cv)
+                    self.get_logger().info("SAM2セグメンテーション非同期実行")
+                self._run_sam2_segmentation_async(image_cv)
                 self.last_sam2_time = current_time
                 self.performance_stats['sam2_times'].append(time.time() - sam2_start)
             
@@ -430,12 +461,24 @@ class LangSamWithOptFlowNode(Node):
             current_time - self.last_sam2_time >= self.sam2_interval
         )
     
-    def _run_grounding_dino_detection_sync(self, image_cv: np.ndarray) -> None:
-        """GroundingDINO検出実行（同期処理）"""
+    def _run_grounding_dino_detection_async(self, image_cv: np.ndarray) -> None:
+        """GroundingDINO検出実行（非同期処理）"""
+        # 既に処理中の場合はスキップ
+        if self.gdino_processing or (self.gdino_future and not self.gdino_future.done()):
+            return
+        
+        # 新しい非同期タスクを開始
+        self.gdino_processing = True
+        self.gdino_future = self.gdino_executor.submit(
+            self._grounding_dino_worker, image_cv.copy()
+        )
+    
+    def _grounding_dino_worker(self, image_cv: np.ndarray) -> Optional[Dict]:
+        """GroundingDINO処理ワーカー（バックグラウンドスレッド）"""
         try:
             if self.gdino_model is None:
                 self.get_logger().warn("GroundingDINOモデルが初期化されていません")
-                return
+                return None
                 
             # PIL画像に変換
             image_pil = Image.fromarray(image_cv, mode='RGB')
@@ -449,30 +492,56 @@ class LangSamWithOptFlowNode(Node):
                     self.text_threshold
                 )
             
-            # 結果を内部データに保存
-            with self.detection_data_lock:
-                if results and len(results) > 0:
-                    self.latest_detection_data = results[0]
-                    self.detection_updated = True
-                    
-                    num_detections = len(self.latest_detection_data.get('boxes', []))
-                    labels = self.latest_detection_data.get('labels', [])
-                    scores = self.latest_detection_data.get('scores', [])
-                    self.get_logger().info(f"GroundingDINO検出: {num_detections}個, ラベル: {labels}")
-                    
-                    # GroundingDINO検出結果の可視化用データを保存
-                    self.latest_grounding_dino_result = {
-                        'image': image_cv.copy(),
-                        'boxes': self.latest_detection_data.get('boxes', []),
-                        'labels': self.latest_detection_data.get('labels', []),
-                        'scores': self.latest_detection_data.get('scores', [])
-                    }
-                    self.grounding_dino_updated = True
+            # 結果を返却
+            if results and len(results) > 0:
+                return {
+                    'detection_data': results[0],
+                    'image': image_cv,
+                    'timestamp': time.time()
+                }
+            else:
+                return None
+                
+        except Exception as e:
+            self.get_logger().error(f"GroundingDINO処理エラー: {e}")
+            return None
+        finally:
+            self.gdino_processing = False
+    
+    def _check_grounding_dino_results(self) -> None:
+        """GroundingDINO非同期処理の結果を確認・統合"""
+        if self.gdino_future and self.gdino_future.done():
+            try:
+                result = self.gdino_future.result()
+                
+                if result is not None:
+                    # 結果を内部データに保存
+                    with self.detection_data_lock:
+                        self.latest_detection_data = result['detection_data']
+                        self.detection_updated = True
+                        
+                        num_detections = len(self.latest_detection_data.get('boxes', []))
+                        labels = self.latest_detection_data.get('labels', [])
+                        scores = self.latest_detection_data.get('scores', [])
+                        self.get_logger().info(f"GroundingDINO検出完了: {num_detections}個, ラベル: {labels}")
+                        
+                        # GroundingDINO検出結果の可視化用データを保存
+                        self.latest_grounding_dino_result = {
+                            'image': result['image'],
+                            'boxes': self.latest_detection_data.get('boxes', []),
+                            'labels': self.latest_detection_data.get('labels', []),
+                            'scores': self.latest_detection_data.get('scores', [])
+                        }
+                        self.grounding_dino_updated = True
                 else:
                     self.get_logger().warn("GroundingDINO検出結果が空です")
                     
-        except Exception as e:
-            self.get_logger().error(f"GroundingDINO検出エラー: {repr(e)}")
+                # 完了したタスクをクリア
+                self.gdino_future = None
+                    
+            except Exception as e:
+                self.get_logger().error(f"GroundingDINO結果統合エラー: {repr(e)}")
+                self.gdino_future = None
     
     def _initialize_tracking_boxes(self, gray: np.ndarray) -> None:
         """検出結果からバウンディングボックス追跡を初期化"""
@@ -501,6 +570,8 @@ class LangSamWithOptFlowNode(Node):
                 # ラベルの重複をカウントするための辞書
                 label_counts = {}
                 
+                # 並列処理の準備: バウンディングボックスとラベルの組み合わせ
+                bbox_label_pairs = []
                 for i, bbox in enumerate(boxes):
                     original_label = labels[i] if i < len(labels) else f'object_{i}'
                     
@@ -517,37 +588,38 @@ class LangSamWithOptFlowNode(Node):
                     
                     unique_label = f"{original_label}_{label_counts[original_label]}"
                     
-                    self.get_logger().info(f"処理中: ラベル'{original_label}' -> '{unique_label}', ボックス={bbox}")
-                    
                     # バウンディングボックスをリストに変換
                     if hasattr(bbox, 'cpu'):  # PyTorch tensor の場合
                         bbox_list = bbox.cpu().numpy().tolist()
                     else:
                         bbox_list = list(bbox)
                     
-                    # バウンディングボックス内の複数特徴点を抽出
-                    feature_points = extract_harris_corners_from_bbox(
-                        gray,
-                        bbox_list,
-                        self.harris_max_corners,
-                        self.harris_quality_level,
-                        self.harris_min_distance,
-                        self.harris_block_size,
-                        self.harris_k,
-                        self.use_harris_detector
-                    )
-                    
-                    # バウンディングボックスの中心点を計算
-                    x1, y1, x2, y2 = bbox_list
-                    center_x = (x1 + x2) / 2
-                    center_y = (y1 + y2) / 2
-                    center_point = np.array([[[center_x, center_y]]], dtype=np.float32)
+                    bbox_label_pairs.append((bbox_list, unique_label))
+                
+                # 並列特徴点検出（複数ボックスがある場合のみ）
+                if len(bbox_label_pairs) > 1:
+                    self.get_logger().info(f"並列特徴点検出を開始: {len(bbox_label_pairs)}個のボックス")
+                    feature_results = self._extract_features_parallel(gray, bbox_label_pairs)
+                else:
+                    # 単一ボックスの場合は同期処理
+                    feature_results = self._extract_features_sequential(gray, bbox_label_pairs)
+                
+                # 結果を統合
+                for result in feature_results:
+                    unique_label = result['label']
+                    bbox_list = result['bbox']
+                    feature_points = result['feature_points']
+                    center_point = result['center_point']
                     
                     if feature_points is not None and len(feature_points) > 0:
                         self.tracked_features_per_label[unique_label] = feature_points
                         self.tracked_centers_per_label[unique_label] = center_point
                         
                         # 特徴点と中心点の相対距離を計算して保存
+                        x1, y1, x2, y2 = bbox_list
+                        center_x = (x1 + x2) / 2
+                        center_y = (y1 + y2) / 2
+                        
                         offsets = []
                         for feature_point in feature_points:
                             fx, fy = feature_point[0]  # (1, 2) -> (2,)
@@ -560,7 +632,6 @@ class LangSamWithOptFlowNode(Node):
                         self.get_logger().info(f"ラベル'{unique_label}': {len(feature_points)}個の特徴点を検出、相対距離を記録")
                     else:
                         # 特徴点が見つからない場合は中心点のみ使用
-                        center_point = np.array([[[center_x, center_y]]], dtype=np.float32)
                         self.tracked_features_per_label[unique_label] = center_point
                         self.tracked_centers_per_label[unique_label] = center_point
                         self.feature_to_center_offsets[unique_label] = np.array([[0.0, 0.0]], dtype=np.float32)  # オフセットなし
@@ -590,6 +661,79 @@ class LangSamWithOptFlowNode(Node):
             self.get_logger().error(f"バウンディングボックス初期化エラー: {repr(e)}")
             import traceback
             self.get_logger().error(f"トレースバック: {traceback.format_exc()}")
+    
+    def _extract_features_parallel(self, gray: np.ndarray, bbox_label_pairs: List[Tuple]) -> List[Dict]:
+        """並列特徴点検出"""
+        from concurrent.futures import as_completed
+        
+        try:
+            future_to_label = {}
+            results = []
+            
+            # 並列タスクを開始
+            for bbox_list, unique_label in bbox_label_pairs:
+                future = self.feature_executor.submit(
+                    self._extract_single_feature, gray, bbox_list, unique_label
+                )
+                future_to_label[future] = unique_label
+            
+            # 結果を収集
+            for future in as_completed(future_to_label.keys()):
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                except Exception as e:
+                    label = future_to_label[future]
+                    self.get_logger().error(f"並列特徴点検出エラー (ラベル: {label}): {e}")
+            
+            return results
+            
+        except Exception as e:
+            self.get_logger().error(f"並列特徴点検出エラー: {e}")
+            # フォールバック: 同期処理
+            return self._extract_features_sequential(gray, bbox_label_pairs)
+    
+    def _extract_features_sequential(self, gray: np.ndarray, bbox_label_pairs: List[Tuple]) -> List[Dict]:
+        """順次特徴点検出"""
+        results = []
+        for bbox_list, unique_label in bbox_label_pairs:
+            result = self._extract_single_feature(gray, bbox_list, unique_label)
+            if result:
+                results.append(result)
+        return results
+    
+    def _extract_single_feature(self, gray: np.ndarray, bbox_list: List[float], unique_label: str) -> Optional[Dict]:
+        """単一バウンディングボックスの特徴点検出"""
+        try:
+            # バウンディングボックス内の複数特徴点を抽出
+            feature_points = extract_harris_corners_from_bbox(
+                gray,
+                bbox_list,
+                self.harris_max_corners,
+                self.harris_quality_level,
+                self.harris_min_distance,
+                self.harris_block_size,
+                self.harris_k,
+                self.use_harris_detector
+            )
+            
+            # バウンディングボックスの中心点を計算
+            x1, y1, x2, y2 = bbox_list
+            center_x = (x1 + x2) / 2
+            center_y = (y1 + y2) / 2
+            center_point = np.array([[[center_x, center_y]]], dtype=np.float32)
+            
+            return {
+                'label': unique_label,
+                'bbox': bbox_list,
+                'feature_points': feature_points,
+                'center_point': center_point
+            }
+            
+        except Exception as e:
+            self.get_logger().error(f"特徴点検出エラー (ラベル: {unique_label}): {e}")
+            return None
     
     def _update_bounding_box_from_center(self, label: str, new_center: np.ndarray) -> Optional[List[float]]:
         """新しい中心点に基づいて元のサイズでバウンディングボックスを再構築"""
@@ -809,35 +953,71 @@ class LangSamWithOptFlowNode(Node):
         return masks_list, scores_list, logits_list
     
     
-    def _run_sam2_segmentation(self, image_cv: np.ndarray) -> None:
-        """SAM2セグメンテーション実行（同期処理、バウンディングボックス入力版）"""
-        try:
-            with self.tracking_data_lock:
-                if not self.tracked_boxes_per_label:
-                    return
-                
-                # 現在の追跡バウンディングボックスデータを取得
-                boxes_data = {
-                    'boxes': [box for box in self.tracked_boxes_per_label.values() if box is not None],
-                    'labels': [label for label, box in self.tracked_boxes_per_label.items() if box is not None]
-                }
-                
-                if not boxes_data['boxes']:
-                    return
+    def _run_sam2_segmentation_async(self, image_cv: np.ndarray) -> None:
+        """SAM2セグメンテーション実行（非同期処理）"""
+        # 既に処理中の場合はスキップ
+        if self.sam2_processing or (self.sam2_future and not self.sam2_future.done()):
+            return
+        
+        # 現在の追跡データを取得
+        with self.tracking_data_lock:
+            if not self.tracked_boxes_per_label:
+                return
             
-            # SAM2処理を同期実行（バウンディングボックス入力）
+            boxes_data = {
+                'boxes': [box for box in self.tracked_boxes_per_label.values() if box is not None],
+                'labels': [label for label, box in self.tracked_boxes_per_label.items() if box is not None]
+            }
+            
+            if not boxes_data['boxes']:
+                return
+        
+        # 新しい非同期タスクを開始
+        self.sam2_processing = True
+        self.sam2_future = self.sam2_executor.submit(
+            self._sam2_worker, image_cv.copy(), boxes_data
+        )
+    
+    def _sam2_worker(self, image_cv: np.ndarray, boxes_data: Dict) -> Optional[Dict]:
+        """SAM2処理ワーカー（バックグラウンドスレッド）"""
+        try:
+            # SAM2処理を実行（バウンディングボックス入力）
             result = self._run_sam2_segmentation_optimized(image_cv, boxes_data)
             
             if result:
-                # 結果を保存
-                with self.sam_data_lock:
-                    self.latest_sam_masks = result
-                    self.sam_updated = True
-                    
-                    self.get_logger().info(f"SAM2セグメンテーション完了: {len(result['masks'])}個のマスク（バウンディングボックス入力）")
+                result['timestamp'] = time.time()
+                return result
+            else:
+                return None
                 
         except Exception as e:
-            self.get_logger().error(f"SAM2セグメンテーションエラー: {repr(e)}")
+            self.get_logger().error(f"SAM2処理エラー: {e}")
+            return None
+        finally:
+            self.sam2_processing = False
+    
+    def _check_sam2_results(self) -> None:
+        """SAM2非同期処理の結果を確認・統合"""
+        if self.sam2_future and self.sam2_future.done():
+            try:
+                result = self.sam2_future.result()
+                
+                if result is not None:
+                    # 結果を内部データに保存
+                    with self.sam_data_lock:
+                        self.latest_sam_masks = result
+                        self.sam_updated = True
+                        
+                        self.get_logger().info(f"SAM2セグメンテーション完了: {len(result['masks'])}個のマスク（非同期処理）")
+                else:
+                    self.get_logger().warn("SAM2処理結果が空です")
+                    
+                # 完了したタスクをクリア
+                self.sam2_future = None
+                    
+            except Exception as e:
+                self.get_logger().error(f"SAM2結果統合エラー: {repr(e)}")
+                self.sam2_future = None
     
     def _publish_results(self, image_cv: np.ndarray) -> None:
         """結果の可視化・配信（非同期化）"""

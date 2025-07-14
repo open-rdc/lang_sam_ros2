@@ -1,16 +1,22 @@
 langsam_with_optflow_node:
   ros__parameters:
     # 基本LangSAMパラメータ
-    sam_model: "sam2.1_hiera_small"
+    sam_model: "sam2.1_hiera_tiny"
     text_prompt: "white line. red pylon. human. wall. car. building. mobility. road."
     box_threshold: 0.3
     text_threshold: 0.2
     tracking_targets: "white line. red pylon. human. car."
     
     # 実行間隔パラメータ（最適化版）
-    grounding_dino_interval: 2.0  # GroundingDINO実行間隔（秒）
-    sam2_interval: 0.05  # SAM2実行間隔（秒）
-    enable_sam2_every_frame: false  # SAM2毎フレーム実行
+    grounding_dino_interval: 0.1  # GroundingDINO実行間隔（秒）
+    sam2_interval: 0.1  # SAM2実行間隔（秒）
+    enable_sam2_every_frame: true  # SAM2毎フレーム実行
+    
+    # 非同期処理設定
+    enable_async_grounding_dino: true  # GroundingDINOの非同期処理を有効化
+    enable_async_sam2: true  # SAM2の非同期処理を有効化
+    enable_parallel_feature_processing: true  # 特徴点処理の並列化を有効化
+    feature_processing_workers: 4  # 特徴点処理の並列ワーカー数
     
     # Harris corner検出パラメータ（最適化版）
     harris_max_corners: 5  # バウンディングボックス内の最大特徴点数
