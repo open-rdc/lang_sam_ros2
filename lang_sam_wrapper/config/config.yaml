@@ -1,7 +1,7 @@
 langsam_with_optflow_node:
   ros__parameters:
     # 基本LangSAMパラメータ
-    sam_model: "sam2.1_hiera_tiny"
+    sam_model: "sam2.1_hiera_small"
     text_prompt: "white line. red pylon. human. wall. car. building. mobility. road."
     box_threshold: 0.3
     text_threshold: 0.2
@@ -17,6 +17,21 @@ langsam_with_optflow_node:
     enable_async_sam2: true  # SAM2の非同期処理を有効化
     enable_parallel_feature_processing: true  # 特徴点処理の並列化を有効化
     feature_processing_workers: 4  # 特徴点処理の並列ワーカー数
+    
+    # 時間整合性設定
+    enable_temporal_alignment: true  # 時間整合性を有効化
+    max_temporal_gap: 1.0  # 最大時間ギャップ（秒）
+    image_buffer_size: 60  # 画像バッファサイズ（フレーム数）
+    catchup_threshold: 0.05  # キャッチアップ処理の閾値（秒）
+    optical_flow_interpolation_threshold: 0.1  # オプティカルフロー補間の閾値（秒）
+    
+    # 追跡統合設定
+    enable_tracking_integration: true  # 既存追跡と新規検出の統合を有効化
+    overlap_iou_threshold: 0.3  # 重複判定のIoU閾値
+    overlap_distance_threshold: 100.0  # 重複判定の距離閾値（ピクセル）
+    merge_weight_existing: 0.7  # マージ時の既存追跡の重み
+    merge_weight_new: 0.3  # マージ時の新規検出の重み
+    detection_timeout: 2.0  # 検出されないオブジェクトの削除タイムアウト（秒）
     
     # Harris corner検出パラメータ（最適化版）
     harris_max_corners: 5  # バウンディングボックス内の最大特徴点数
