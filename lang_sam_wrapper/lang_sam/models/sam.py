@@ -46,7 +46,7 @@ class SAM:
             checkpoint_url = SAM_MODELS[self.sam_type]["url"]
             state_dict = torch.hub.load_state_dict_from_url(checkpoint_url, map_location="cpu")["model"]
         else:
-            checkpoint_url = self.ckpt_path  # Ensure checkpoint_url is defined
+            checkpoint_url = self.ckpt_path
             state_dict = torch.load(self.ckpt_path, map_location="cpu", weights_only=True)["model"]
         try:
             model.load_state_dict(state_dict, strict=True)

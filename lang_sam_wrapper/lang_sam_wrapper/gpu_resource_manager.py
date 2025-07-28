@@ -325,8 +325,7 @@ class GPUResourceManager:
             
             # エグゼキューターを終了（タイムアウト付き）
             try:
-                self.gpu_executor.shutdown(wait=False)
-                import time
+                self.gpu_executor.shutdown(wait=True, timeout=5.0)
                 time.sleep(0.1)  # 短い待機
             except Exception as e:
                 self.logger.warning(f"GPUエグゼキューター終了エラー: {e}")

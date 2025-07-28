@@ -66,7 +66,6 @@ def generate_labelme_json(binary_masks, labels, image_size, image_path=None):
         A dictionary representing the LabelMe JSON file.
     """
     num_masks = binary_masks.shape[0]
-    binary_masks = binary_masks.numpy()
 
     json_dict = {
         "version": "4.5.6",
@@ -77,6 +76,10 @@ def generate_labelme_json(binary_masks, labels, image_size, image_path=None):
         "shapes": [],
         "imageData": None,
     }
+
+    # Convert to numpy if tensor
+    if hasattr(binary_masks, 'numpy'):
+        binary_masks = binary_masks.numpy()
 
     # Loop through the masks and add them to the JSON dictionary
     for i in range(num_masks):

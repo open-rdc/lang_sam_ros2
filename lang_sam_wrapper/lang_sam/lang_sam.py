@@ -61,7 +61,6 @@ class LangSAM:
 
             all_results.append(processed_result)
         if sam_images:
-            print(f"Predicting {len(sam_boxes)} masks")
             masks, mask_scores, _ = self.sam.predict_batch(sam_images, xyxy=sam_boxes)
             for idx, mask, score in zip(sam_indices, masks, mask_scores):
                 all_results[idx].update(
@@ -70,14 +69,6 @@ class LangSAM:
                         "mask_scores": score,
                     }
                 )
-            print(f"Predicted {len(all_results)} masks")
         return all_results
 
 
-if __name__ == "__main__":
-    model = LangSAM()
-    out = model.predict(
-        [Image.open("./assets/food.jpg"), Image.open("./assets/car.jpeg")],
-        ["food", "car"],
-    )
-    print(out)

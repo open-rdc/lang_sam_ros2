@@ -4,6 +4,7 @@
 
 import cv2
 import numpy as np
+import logging
 from typing import List, Tuple, Optional, Union
 
 
@@ -34,7 +35,6 @@ def extract_harris_corners_from_bbox(
         特徴点配列 shape: (N, 1, 2) またはNone
     """
     try:
-        print(f"Harris corner検出開始: bbox={bbox}")
         
         # バウンディングボックスの座標を整数に変換
         x1, y1, x2, y2 = [int(coord) for coord in bbox]
@@ -47,17 +47,14 @@ def extract_harris_corners_from_bbox(
         x2 = max(x1 + 1, min(x2, width))
         y2 = max(y1 + 1, min(y2, height))
         
-        print(f"座標変換: 元={original_coords}, 調整後=({x1}, {y1}, {x2}, {y2}), 画像サイズ=({width}, {height})")
         
         # バウンディングボックス内の領域を抽出
         roi = gray_image[y1:y2, x1:x2]
-        print(f"ROIサイズ: {roi.shape}")
         
         # ROIが小さすぎる場合は中心点を返す
         if roi.shape[0] < 5 or roi.shape[1] < 5:
             center_x = (x1 + x2) / 2
             center_y = (y1 + y2) / 2
-            print(f"ROIが小さすぎます。中心点を返します: ({center_x}, {center_y})")
             return np.array([[[center_x, center_y]]], dtype=np.float32)
         
         # Harris corner検出
@@ -71,25 +68,21 @@ def extract_harris_corners_from_bbox(
             k=harris_k
         )
         
-        print(f"goodFeaturesToTrack結果: {corners is not None and len(corners) if corners is not None else 0}個の特徴点")
         
         # 検出された特徴点を元の画像座標系に変換
         if corners is not None and len(corners) > 0:
             corners[:, 0, 0] += x1  # x座標にオフセット追加
             corners[:, 0, 1] += y1  # y座標にオフセット追加
-            print(f"特徴点座標変換完了: {len(corners)}個")
             return corners
         else:
             # 特徴点が見つからない場合は中心点を返す
             center_x = (x1 + x2) / 2
             center_y = (y1 + y2) / 2
-            print(f"特徴点が見つかりません。中心点を返します: ({center_x}, {center_y})")
             return np.array([[[center_x, center_y]]], dtype=np.float32)
             
     except Exception as e:
-        print(f"Harris corner抽出エラー: {e}")
         import traceback
-        print(f"トレースバック: {traceback.format_exc()}")
+        logging.getLogger(__name__).error(f"Harris corner抽出エラー: {e}\nトレースバック: {traceback.format_exc()}")
         # エラー時は中心点を返す
         x1, y1, x2, y2 = bbox
         center_x = (x1 + x2) / 2
