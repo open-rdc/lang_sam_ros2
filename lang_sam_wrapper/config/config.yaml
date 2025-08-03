@@ -1,7 +1,7 @@
 langsam_with_optflow_node:
   ros__parameters:
     # 基本LangSAMパラメータ
-    sam_model: "sam2.1_hiera_small"
+    sam_model: "sam2.1_hiera_small" 
     text_prompt: "white line. red pylon. human. wall. car. building. mobility. road."
     box_threshold: 0.3
     text_threshold: 0.2
@@ -15,15 +15,14 @@ langsam_with_optflow_node:
     # 非同期処理設定
     enable_async_grounding_dino: true  # GroundingDINOの非同期処理を有効化
     enable_async_sam2: true  # SAM2の非同期処理を有効化
-    enable_parallel_feature_processing: true  # 特徴点処理の並列化を有効化
-    feature_processing_workers: 4  # 特徴点処理の並列ワーカー数
+    enable_parallel_tracker_processing: true  # トラッカー処理の並列化を有効化
+    tracker_processing_workers: 4  # トラッカー処理の並列ワーカー数
     
-    # 時間整合性設定
+    # 時間整合性設定（シンプル化）
     enable_temporal_alignment: true  # 時間整合性を有効化
-    max_temporal_gap: 1.0  # 最大時間ギャップ（秒）
-    image_buffer_size: 60  # 画像バッファサイズ（フレーム数）
-    catchup_threshold: 0.05  # キャッチアップ処理の閾値（秒）
-    optical_flow_interpolation_threshold: 0.1  # オプティカルフロー補間の閾値（秒）
+    image_buffer_size: 30  # 画像バッファサイズ（フレーム数）
+    # 保存画像システム設定
+    stored_images_max: 30  # 保存画像の最大数
     
     # 追跡統合設定
     enable_tracking_integration: true  # 既存追跡と新規検出の統合を有効化
@@ -33,32 +32,13 @@ langsam_with_optflow_node:
     merge_weight_new: 0.3  # マージ時の新規検出の重み
     detection_timeout: 2.0  # 検出されないオブジェクトの削除タイムアウト（秒）
     
-    # Harris corner検出パラメータ（最適化版）
-    harris_max_corners: 5  # バウンディングボックス内の最大特徴点数
-    harris_quality_level: 0.02  # Harris corner品質レベル
-    harris_min_distance: 15  # Harris corner間の最小距離
-    harris_block_size: 3  # Harris corner検出ブロックサイズ
-    harris_k: 0.04  # Harris検出器のkパラメータ
-    use_harris_detector: true  # Harris検出器使用（false=Shi-Tomasi）
+    # CSRTトラッカーパラメータ（シンプル化）
+    csrt_tracker_type: "CSRT"  # トラッカータイプ（CSRT固定）
+    min_tracker_confidence: 0.2  # 最小トラッカー信頼度
+    tracker_failure_threshold: 20  # 連続失敗回数の閾値
     
-    # 特徴点選択パラメータ
-    feature_selection_method: "center_point"  # 特徴点選択方法
-    
-    # エッジ検出パラメータ
-    canny_low_threshold: 50   # Canny edge検出の低閾値
-    canny_high_threshold: 150 # Canny edge検出の高閾値
-    min_edge_pixels: 10       # 有効とみなす最小エッジピクセル数
-    
-    # オプティカルフローパラメータ（最適化版）
-    optical_flow_win_size_x: 21  # オプティカルフローウィンドウサイズX
-    optical_flow_win_size_y: 21  # オプティカルフローウィンドウサイズY
-    optical_flow_max_level: 3  # ピラミッドの最大レベル
-    optical_flow_criteria_eps: 0.01  # 収束判定のイプシロン値
-    optical_flow_criteria_max_count: 15  # 最大反復回数
-    
-    # 追跡検証パラメータ
+    # 追跡検証パラメータ（簡素化）
     max_displacement: 50.0  # 最大変位閾値（ピクセル）
-    min_valid_ratio: 0.5  # 有効な追跡点の最小割合
     
     # CUDA設定パラメータ
     cuda_arch_list: "6.0;6.1;7.0;7.5;8.0;8.6"
@@ -69,7 +49,7 @@ langsam_with_optflow_node:
     enable_memory_optimization: true
     enable_gpu_memory_cleanup: true
     
-    # ログ設定
+    # ログ設定（シンプル化）
     enable_parameter_logging: true
     enable_fps_logging: true
     log_level_override: ""  

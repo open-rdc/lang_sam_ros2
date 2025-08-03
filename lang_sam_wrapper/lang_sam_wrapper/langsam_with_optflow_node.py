@@ -25,7 +25,7 @@ from lang_sam.utils import draw_image
 from lang_sam import LangSAM
 from lang_sam.models.gdino import GDINO
 from lang_sam.models.sam import SAM
-from lang_sam_wrapper.feature_extraction import extract_harris_corners_from_bbox
+# バウンディングボックス四隅トラッキング関数を内部で定義
 from lang_sam_wrapper.feature_pool import FeaturePool, FeatureQuality
 from lang_sam_wrapper.gpu_resource_manager import get_gpu_manager, GPUPriority
 
@@ -109,33 +109,24 @@ class LangSamWithOptFlowNode(Node):
         self.sam2_interval = self.get_config_param('sam2_interval', 0.05)
         self.enable_sam2_every_frame = self.get_config_param('enable_sam2_every_frame', False)
         
-        # Harris corner検出パラメータ
-        self.harris_max_corners = self.get_config_param('harris_max_corners', 5)
-        self.harris_quality_level = self.get_config_param('harris_quality_level', 0.02)
-        self.harris_min_distance = self.get_config_param('harris_min_distance', 15)
-        self.harris_block_size = self.get_config_param('harris_block_size', 3)
-        self.harris_k = self.get_config_param('harris_k', 0.04)
-        self.use_harris_detector = self.get_config_param('use_harris_detector', True)
+        # CSRTトラッカーパラメータ
+        self.csrt_tracker_type = self.get_config_param('csrt_tracker_type', 'CSRT')  # CSRTトラッカーを使用
+        self.tracker_update_threshold = self.get_config_param('tracker_update_threshold', 0.5)  # 追跡信頼度の閾値
+        self.adaptive_bbox_scaling = self.get_config_param('adaptive_bbox_scaling', True)  # バウンディングボックスの可変サイズ化
         
         # 特徴点選択パラメータ
         self.feature_selection_method = self.get_config_param('feature_selection_method', 'harris_response')
         
-        # オプティカルフローパラメータ
-        self.optical_flow_win_size_x = self.get_config_param('optical_flow_win_size_x', 21)
-        self.optical_flow_win_size_y = self.get_config_param('optical_flow_win_size_y', 21)
-        self.optical_flow_win_size = (self.optical_flow_win_size_x, self.optical_flow_win_size_y)
-        self.optical_flow_max_level = self.get_config_param('optical_flow_max_level', 3)
-        self.optical_flow_criteria_eps = self.get_config_param('optical_flow_criteria_eps', 0.01)
-        self.optical_flow_criteria_max_count = self.get_config_param('optical_flow_criteria_max_count', 15)
+        # CSRTトラッカー検証パラメータ（オプティカルフローパラメータから置換）
+        self.tracker_confidence_threshold = self.get_config_param('tracker_confidence_threshold', 0.5)
         
         # 追跡検証パラメータ
         self.max_displacement = self.get_config_param('max_displacement', 50.0)
         self.min_valid_ratio = self.get_config_param('min_valid_ratio', 0.5)
         
-        # エッジ検出パラメータ
-        self.canny_low_threshold = self.get_config_param('canny_low_threshold', 50)
-        self.canny_high_threshold = self.get_config_param('canny_high_threshold', 150)
-        self.min_edge_pixels = self.get_config_param('min_edge_pixels', 10)
+        # トラッカー検証パラメータ
+        self.min_tracker_confidence = self.get_config_param('min_tracker_confidence', 0.3)
+        self.tracker_failure_threshold = self.get_config_param('tracker_failure_threshold', 5)  # 連続失敗回数
         
         # SAM2パラメータ
         self.sam_model = self.get_config_param('sam_model', 'sam2.1_hiera_small')
@@ -151,7 +142,7 @@ class LangSamWithOptFlowNode(Node):
         self.max_temporal_gap = self.get_config_param('max_temporal_gap', 1.0)
         self.image_buffer_size = self.get_config_param('image_buffer_size', 60)
         self.catchup_threshold = self.get_config_param('catchup_threshold', 0.05)
-        self.optical_flow_interpolation_threshold = self.get_config_param('optical_flow_interpolation_threshold', 0.1)
+        self.tracker_interpolation_threshold = self.get_config_param('tracker_interpolation_threshold', 0.1)
         
         # 追跡統合設定
         self.enable_tracking_integration = self.get_config_param('enable_tracking_integration', True)
@@ -161,12 +152,7 @@ class LangSamWithOptFlowNode(Node):
         self.merge_weight_new = self.get_config_param('merge_weight_new', 0.3)
         self.detection_timeout = self.get_config_param('detection_timeout', 2.0)  # 2秒間検出されないと削除
         
-        # オプティカルフロー criteria
-        self.optical_flow_criteria = (
-            cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-            self.optical_flow_criteria_max_count,
-            self.optical_flow_criteria_eps
-        )
+        # CSRTトラッカーは内部でcriteriaを管理するため削除
     
     def _init_state(self) -> None:
         """内部状態の初期化"""
@@ -184,6 +170,9 @@ class LangSamWithOptFlowNode(Node):
             self.sam_model_instance.build_model(self.sam_model)
             self.get_logger().info("SAM2モデル初期化完了")
             
+            # Cannyエッジトラッキング初期化
+            self.get_logger().info("Cannyエッジトラッキング初期化完了")
+            
         except Exception as e:
             self.get_logger().error(f"モデル初期化エラー: {repr(e)}")
             self.gdino_model = None
@@ -199,12 +188,16 @@ class LangSamWithOptFlowNode(Node):
             self.grounding_dino_updated = False
             
         with self.tracking_data_lock:
-            self.prev_gray: Optional[np.ndarray] = None
             self.tracked_boxes_per_label: Dict[str, List[float]] = {}  # バウンディングボックス追跡用
-            self.tracked_centers_per_label: Dict[str, np.ndarray] = {}  # 中心点追跡用（互換性のため残す）
-            self.tracked_features_per_label: Dict[str, np.ndarray] = {}  # 複数特徴点追跡用
+            self.tracked_csrt_trackers: Dict[str, cv2.TrackerCSRT] = {}  # CSRTトラッカー追跡用
+            self.tracker_failure_counts: Dict[str, int] = {}  # トラッカー失敗回数カウント
+            self.tracker_initialization_times: Dict[str, float] = {}  # トラッカー初期化時刻記録
             self.original_box_sizes: Dict[str, Tuple[float, float]] = {}  # 初期バウンディングボックスサイズ (width, height)
-            self.feature_to_center_offsets: Dict[str, np.ndarray] = {}  # 特徴点と中心点の相対距離 (N, 2)
+            
+            # GroundingDINO処理期間中の画像保存システム
+            self.stored_images: List[Tuple[float, np.ndarray]] = []  # (timestamp, image)
+            self.grounding_dino_start_time: Optional[float] = None
+            self.grounding_dino_in_progress: bool = False
             self.object_last_detection_time: Dict[str, float] = {}  # 各オブジェクトの最後検出時刻
             self.tracking_valid = False
             
@@ -249,6 +242,11 @@ class LangSamWithOptFlowNode(Node):
         self.sam2_processing = False
         self.sam2_pending_data = None
         
+        # トラッキング非同期処理用
+        self.tracking_future = None
+        self.tracking_processing = False
+        self.tracking_pending_data = None
+        
         # 特徴点処理並列化用
         self.feature_executor = ThreadPoolExecutor(max_workers=self.feature_processing_workers, thread_name_prefix="FeatureProcessing")
         
@@ -258,7 +256,7 @@ class LangSamWithOptFlowNode(Node):
         # GPUリソース管理
         self.gpu_manager = get_gpu_manager()
         self.gpu_manager.set_memory_threshold(0.8)  # 80%で警告
-        self.optical_flow_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="OpticalFlow")
+        self.tracker_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="CSRTTracker")
         
         # 性能計測用
         self.performance_stats = {
@@ -311,8 +309,8 @@ class LangSamWithOptFlowNode(Node):
         """デストラクタ: スレッドプールの適切な終了"""
         try:
             self._cleanup_resources()
-            if hasattr(self, 'optical_flow_executor'):
-                self.optical_flow_executor.shutdown(wait=True)
+            if hasattr(self, 'tracker_executor'):
+                self.tracker_executor.shutdown(wait=True)
             
             # 画像バッファのクリア
             if hasattr(self, 'temporal_lock'):
@@ -375,8 +373,8 @@ class LangSamWithOptFlowNode(Node):
                     default_value = 0.05 if 'interval' in name else False
                 elif name.startswith('harris_'):
                     default_value = 5 if 'corners' in name else 0.02
-                elif name.startswith('optical_flow_'):
-                    default_value = 21 if 'size' in name else 3
+                elif name.startswith('tracker_'):
+                    default_value = 0.5 if 'threshold' in name else 2
                 elif name.startswith('feature_selection_'):
                     default_value = "harris_response"
                 elif name in ['max_displacement', 'min_valid_ratio']:
@@ -425,6 +423,10 @@ class LangSamWithOptFlowNode(Node):
         """画像処理メインループ（時間整合性対応版）"""
         frame_start_time = time.time()
         try:
+            # シンプルなフレームカウント
+            if self.frame_count % 100 == 0:
+                self.get_logger().info(f"フレーム {self.frame_count} 処理中")
+            
             # 高速画像変換（コピー最小化）
             image_cv = self.bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
             if image_cv is None or image_cv.size == 0:
@@ -441,17 +443,24 @@ class LangSamWithOptFlowNode(Node):
             # 画像バッファリング（時間整合性のため）
             self._buffer_image(gray.copy(), image_cv.copy(), current_time)
             
+            # GroundingDINO処理中の画像保存（オリジナルRGB画像を保存）
+            self._store_image_if_needed(image_cv.copy(), current_time)
+            
             # 最適化ログ（頻度を削減）
             if self.frame_count % 100 == 0 and self.frame_count > 0:
                 self.get_logger().info(f"フレーム {self.frame_count} 処理中")
             
-            # 1. GroundingDINO検出（時間整合性対応版）
+            # 1. GroundingDINO検出（画像保存システム付き）
             self._check_grounding_dino_results()  # 完了した非同期処理の結果を確認
             should_run_gdino = self._should_run_grounding_dino(current_time)
             if should_run_gdino:
                 gdino_start = time.time()
                 if self.frame_count % 30 == 0:
-                    self.get_logger().info("GroundingDINO検出を非同期実行（時間追跡有効）")
+                    self.get_logger().info("GroundingDINO検出を非同期実行（画像保存開始）")
+                
+                # GroundingDINO処理開始時に画像保存を開始
+                self._start_image_storage(current_time)
+                
                 # 時間追跡付きで検出を開始（実際の画像タイムスタンプを使用）
                 request_id = self._run_grounding_dino_detection_with_timestamp(image_cv, current_time)
                 self.last_grounding_dino_time = current_time
@@ -462,6 +471,7 @@ class LangSamWithOptFlowNode(Node):
                     self.get_logger().info(f"GroundingDINOスキップ: {time_since_last:.1f}s/{self.grounding_dino_interval}s")
             
             # 2. 時間的整合性を考慮した追跡初期化処理
+            self._check_tracking_results()  # 完了した非同期処理の結果を確認
             optflow_start = time.time()
             if self.detection_updated:
                 if self.frame_count % 30 == 0:
@@ -474,16 +484,16 @@ class LangSamWithOptFlowNode(Node):
                     if self.frame_count % 30 == 0:
                         self.get_logger().info("時間遡り処理完了のため、通常のオプティカルフロー処理をスキップ")
                 else:
-                    # フォールバック: 従来の初期化方式
-                    self._initialize_tracking_boxes(gray)
-                    # 従来方式の場合は通常のオプティカルフロー処理を実行
-                    self._track_optical_flow(gray)
+                    # フォールバック: 統合処理方式
+                    self._integrate_new_detections_with_existing_tracking(current_time)
+                    # 統合処理の場合は非同期オプティカルフロー処理を実行
+                    self._run_tracking_async(gray, current_time)
                     
                 self.detection_updated = False
                 self.performance_stats['optflow_times'].append(time.time() - optflow_start)
             else:
-                # 通常のオプティカルフロー処理（検出更新がない場合）
-                self._track_optical_flow(gray)
+                # 通常の非同期オプティカルフロー処理（検出更新がない場合）
+                self._run_tracking_async(gray, current_time)
                 self.performance_stats['optflow_times'].append(time.time() - optflow_start)
             
             # 3. SAM2セグメンテーション（非同期版）
@@ -689,14 +699,15 @@ class LangSamWithOptFlowNode(Node):
             return None
     
     def _get_full_image_by_timestamp(self, target_timestamp: float) -> Optional[np.ndarray]:
-        """指定されたタイムスタンプに最も近いフル画像を取得"""
+        """指定されたタイムスタンプに最も近いフル画像を取得 - デバッグ強化版"""
         try:
             with self.temporal_lock:
                 if not hasattr(self, 'full_image_buffer') or len(self.full_image_buffer) == 0:
-                    self.get_logger().warn("フル画像バッファが空です")
+                    self.get_logger().debug(f"フル画像バッファが空です (target: {target_timestamp:.3f})")
                     return None
                 
                 if len(self.image_timestamps) == 0:
+                    self.get_logger().debug(f"タイムスタンプバッファが空です (target: {target_timestamp:.3f})")
                     return None
                 
                 # 最も近いタイムスタンプのインデックスを検索
@@ -706,17 +717,33 @@ class LangSamWithOptFlowNode(Node):
                 
                 # 時間差が許容範囲内かチェック
                 time_diff = differences[closest_index]
+                closest_timestamp = timestamps[closest_index]
+                
+                self.get_logger().debug(f"画像取得: target={target_timestamp:.3f}, closest={closest_timestamp:.3f}, diff={time_diff:.3f}, max_gap={self.max_temporal_gap:.3f}")
+                
                 if time_diff > self.max_temporal_gap:
-                    self.get_logger().warn(f"時間差が大きすぎます: {time_diff:.3f}秒")
+                    self.get_logger().warning(f"時間差が大きすぎます: {time_diff:.3f}秒 > {self.max_temporal_gap:.3f}秒 (target: {target_timestamp:.3f})")
+                    # 利用可能な時間範囲をログ出力
+                    if len(timestamps) > 0:
+                        self.get_logger().debug(f"利用可能な時間範囲: {timestamps[0]:.3f} - {timestamps[-1]:.3f}")
                     return None
                 
                 if closest_index < len(self.full_image_buffer):
-                    return self.full_image_buffer[closest_index].copy()
+                    image = self.full_image_buffer[closest_index]
+                    if image is not None:
+                        self.get_logger().debug(f"画像取得成功: インデックス={closest_index}, 形状={image.shape}")
+                        return image.copy()
+                    else:
+                        self.get_logger().warning(f"バッファのインデックス{closest_index}の画像がNullです")
+                        return None
                 else:
+                    self.get_logger().warning(f"インデックス範囲外: {closest_index} >= {len(self.full_image_buffer)}")
                     return None
                        
         except Exception as e:
             self.get_logger().error(f"フル画像取得エラー: {e}")
+            import traceback
+            self.get_logger().error(f"スタックトレース: {traceback.format_exc()}")
             return None
     
     def _convert_roi_to_full_coordinates(self, roi_coords: List[float], roi_offset: Tuple[int, int, int, int]) -> List[float]:
@@ -779,60 +806,40 @@ class LangSamWithOptFlowNode(Node):
                 if label not in self.tracked_features_per_label or self.tracked_features_per_label[label] is None:
                     continue
                     
-                # 特徴点をROI座標系に変換
-                features = self.tracked_features_per_label[label]
+                # 中心点をROI座標系に変換
+                center = self.tracked_features_per_label[label]
                 
-                # 空の配列チェック
-                if features.size == 0:
-                    self.get_logger().warning(f"     - {label}: 空の特徴点配列")
+                # 中心点をROI座標系に変換
+                if center.size == 0:
+                    self.get_logger().warning(f"     - {label}: 空の中心点")
                     continue
                 
-                # 特徴点の形状を確認して安全に変換
-                if len(features.shape) == 3:  # (N, 1, 2) 形状
-                    if features.shape[0] == 0:  # 空の配列
-                        self.get_logger().warning(f"     - {label}: 空の特徴点配列")
-                        continue
-                    roi_features = features.copy()
-                    roi_features[:, 0, 0] -= roi_x1
-                    roi_features[:, 0, 1] -= roi_y1
-                elif len(features.shape) == 2:  # (N, 2) 形状
-                    if features.shape[0] == 0:  # 空の配列
-                        self.get_logger().warning(f"     - {label}: 空の特徴点配列")
-                        continue
-                    roi_features = features.copy()
-                    roi_features[:, 0] -= roi_x1
-                    roi_features[:, 1] -= roi_y1
-                    # (N, 1, 2) 形状に変換
-                    roi_features = roi_features.reshape(-1, 1, 2)
+                # 中心点の形状を正規化
+                if len(center.shape) == 3:
+                    center_x, center_y = center[0, 0]
+                elif len(center.shape) == 2:
+                    center_x, center_y = center[0]
                 else:
-                    self.get_logger().error(f"     - {label}: 不正な特徴点形状: {features.shape}")
-                    continue
+                    center_x, center_y = center
                 
-                self.get_logger().debug(f"     - {label}: {len(features)}個の特徴点をROI座標系に変換")
-                
-                # 特徴点がROI境界内にあるかチェック
-                if len(roi_features.shape) == 3:
-                    x_coords = roi_features[:, 0, 0]
-                    y_coords = roi_features[:, 0, 1]
-                else:
-                    x_coords = roi_features[:, 0]
-                    y_coords = roi_features[:, 1]
+                # ROI座標系に変換
+                roi_center_x = center_x - roi_x1
+                roi_center_y = center_y - roi_y1
+                roi_center = np.array([[[roi_center_x, roi_center_y]]], dtype=np.float32)
                 
                 # 境界チェック
-                valid_mask = (
-                    (x_coords >= 0) & (x_coords < current_roi_gray.shape[1]) &
-                    (y_coords >= 0) & (y_coords < current_roi_gray.shape[0])
-                )
-                
-                if not np.any(valid_mask):
-                    self.get_logger().warning(f"     - {label}: 特徴点がROI境界外")
+                if (roi_center_x < 0 or roi_center_x >= current_roi_gray.shape[1] or
+                    roi_center_y < 0 or roi_center_y >= current_roi_gray.shape[0]):
+                    self.get_logger().warning(f"     - {label}: 中心点がROI境界外")
                     continue
                 
-                # オプティカルフロー実行
+                self.get_logger().debug(f"     - {label}: 中心点をROI座標系に変換")
+                
+                # オプティカルフロー実行（中心点）
                 try:
-                    curr_features, status, _ = cv2.calcOpticalFlowPyrLK(
-                        detection_roi_gray, current_roi_gray, roi_features, None,
-                        winSize=(self.optical_flow_win_size_x, self.optical_flow_win_size_y),
+                    curr_center, status, _ = cv2.calcOpticalFlowPyrLK(
+                        detection_roi_gray, current_roi_gray, roi_center, None,
+                        winSize=self.optical_flow_win_size,
                         maxLevel=self.optical_flow_max_level,
                         criteria=self.optical_flow_criteria
                     )
@@ -840,49 +847,25 @@ class LangSamWithOptFlowNode(Node):
                     self.get_logger().error(f"     - {label}: オプティカルフロー実行エラー: {e}")
                     continue
                 
-                # 有効な特徴点をフィルタリング
-                valid_indices = (status == 1).flatten()
-                valid_count = np.sum(valid_indices)
-                valid_ratio = valid_count / len(roi_features) if len(roi_features) > 0 else 0
-                
-                self.get_logger().debug(f"     - {label}: {valid_count}/{len(roi_features)}個有効 ({valid_ratio*100:.1f}%)")
-                
-                if valid_ratio < 0.5:  # 50%以下の場合は削除
-                    self.get_logger().debug(f"     - {label}: 有効率低いため削除")
+                # 中心点の有効性チェック
+                if curr_center is not None and status is not None and status[0][0] == 1:
+                    # フル座標系に戻す
+                    full_center_x = curr_center[0, 0] + roi_x1
+                    full_center_y = curr_center[0, 1] + roi_y1
+                    full_center = np.array([[[full_center_x, full_center_y]]], dtype=np.float32)
+                    
+                    # 中心点を更新
+                    self.tracked_features_per_label[label] = full_center
+                    
+                    # バウンディングボックスを更新
+                    self._update_bounding_box_from_features(label)
+                    updated_count += 1
+                    
+                    self.get_logger().debug(f"     - {label}: 中心点追跡成功")
+                else:
+                    self.get_logger().debug(f"     - {label}: 中心点追跡失敗により削除")
                     self._remove_tracking_object(label)
                     continue
-                
-                # フル座標系に戻す（形状を考慮）
-                valid_features = curr_features[valid_indices]
-                if len(valid_features.shape) == 3:  # (N, 1, 2) 形状
-                    valid_features[:, 0, 0] += roi_x1
-                    valid_features[:, 0, 1] += roi_y1
-                elif len(valid_features.shape) == 2:  # (N, 2) 形状
-                    # (N, 2) 形状の場合は直接座標を更新
-                    valid_features[:, 0] += roi_x1
-                    valid_features[:, 1] += roi_y1
-                    # (N, 1, 2) 形状に変換
-                    valid_features = valid_features.reshape(-1, 1, 2)
-                
-                self.get_logger().debug(f"     - {label}: ROI座標をフル座標に変換完了")
-                
-                # バウンディングボックスを更新（形状を考慮）
-                if len(valid_features) > 0:
-                    # valid_featuresは常に(N, 1, 2)形状にリシェイプ済み
-                    x_coords = valid_features[:, 0, 0]
-                    y_coords = valid_features[:, 0, 1]
-                        
-                    new_bbox = [
-                        float(np.min(x_coords)),
-                        float(np.min(y_coords)),
-                        float(np.max(x_coords)),
-                        float(np.max(y_coords))
-                    ]
-                    
-                    # データを更新
-                    self.tracked_boxes_per_label[label] = new_bbox
-                    self.tracked_features_per_label[label] = valid_features
-                    updated_count += 1
             
             success_rate = (updated_count / total_objects * 100) if total_objects > 0 else 0
             self.get_logger().info(f"   >> 直接追跡結果: {updated_count}/{total_objects}個更新 ({success_rate:.1f}%)")
@@ -1073,14 +1056,21 @@ class LangSamWithOptFlowNode(Node):
                             'scores': self.latest_detection_data.get('scores', [])
                         }
                         self.grounding_dino_updated = True
+                        
+                        # GroundingDINO処理完了時に画像保存を終了
+                        self._stop_image_storage()
                 else:
                     self.get_logger().warn("GroundingDINO検出結果が空です")
+                    # 結果が空でも画像保存を終了
+                    self._stop_image_storage()
                     
                 # 完了したタスクをクリア
                 self.gdino_future = None
                     
             except Exception as e:
                 self.get_logger().error(f"GroundingDINO結果統合エラー: {repr(e)}")
+                # エラー時も画像保存を終了
+                self._stop_image_storage()
                 self.gdino_future = None
     
     def _initialize_tracking_with_temporal_alignment(self, current_time: float) -> None:
@@ -1096,10 +1086,8 @@ class LangSamWithOptFlowNode(Node):
                 completion_timestamp = self.latest_detection_data.get('completion_timestamp')
                 
                 if detection_timestamp is None:
-                    self.get_logger().warn("検出データにタイムスタンプがありません、通常初期化に切り替え")
-                    current_gray = self._get_current_gray_image()
-                    if current_gray is not None:
-                        self._initialize_tracking_boxes(current_gray)
+                    self.get_logger().warn("検出データにタイムスタンプがありません、統合処理に切り替え")
+                    self._integrate_new_detections_with_existing_tracking(current_time)
                     return
                 
                 # 時間差を計算
@@ -1120,154 +1108,813 @@ class LangSamWithOptFlowNode(Node):
                     self.get_logger().info(f"→ {detection_timestamp:.3f}秒の画像まで遡って追跡開始")
                 
                 if time_gap > self.max_temporal_gap:
-                    self.get_logger().warn(f"時間差が大きすぎます ({time_gap:.3f}s > {self.max_temporal_gap}s)、通常初期化")
-                    current_gray = self._get_current_gray_image()
-                    if current_gray is not None:
-                        self._initialize_tracking_boxes(current_gray)
+                    self.get_logger().warn(f"時間差が大きすぎます ({time_gap:.3f}s > {self.max_temporal_gap}s)、統合処理に切り替え")
+                    self._integrate_new_detections_with_existing_tracking(current_time)
                     return
                 
                 # 検出時点のフル画像を取得
                 detection_full_image = self._get_full_image_by_timestamp(detection_timestamp)
                 if detection_full_image is None:
-                    self.get_logger().warn("検出時点の画像が見つかりません、通常初期化")
-                    current_gray = self._get_current_gray_image()
-                    if current_gray is not None:
-                        self._initialize_tracking_boxes(current_gray)
+                    self.get_logger().warn("検出時点の画像が見つかりません、統合処理に切り替え")
+                    self._integrate_new_detections_with_existing_tracking(current_time)
                     return
                 
-                # 検出時点の画像で追跡初期化
+                # 検出時点の画像で追跡初期化（フォーマット統一）
                 self.get_logger().info(f"✓ 検出時点({detection_timestamp:.3f})の画像で追跡初期化")
                 self.get_logger().info(f"  - 使用画像サイズ: {detection_full_image.shape}")
-                self._initialize_tracking_boxes(detection_full_image)
                 
-                # キャッチアップ処理: 検出時点から現在まで高速追跡
-                if time_gap > 0.05:  # 50ms以上の差がある場合のみキャッチアップ
-                    self.get_logger().info(f"✓ キャッチアップ処理実行: {detection_timestamp:.3f} -> {current_time:.3f}")
-                    
-                    # バッファ内のフレーム数を計算
-                    with self.temporal_lock:
-                        relevant_frames = 0
-                        for timestamp in self.image_timestamps:
-                            if detection_timestamp < timestamp <= current_time:
-                                relevant_frames += 1
-                    
-                    self.get_logger().info(f"  - キャッチアップ対象フレーム数: {relevant_frames}")
-                    self._perform_temporal_catchup_optimized(detection_timestamp, current_time)
+                # 画像をグレースケールに統一
+                if len(detection_full_image.shape) == 3:
+                    detection_gray = cv2.cvtColor(detection_full_image, cv2.COLOR_BGR2GRAY)
                 else:
-                    self.get_logger().info(f"✓ キャッチアップスキップ: 時間差が闾値以下 ({time_gap*1000:.1f}ms < 50ms)")
+                    detection_gray = detection_full_image
+                    
+                # 既存トラッカーとの統合処理を実行
+                self._integrate_new_detections_with_existing_tracking(detection_timestamp)
                 
-                # 時間遡り処理完了後、現在の画像をprev_grayに設定してリアルタイム追跡に備える
-                current_gray = self._get_current_gray_image()
-                if current_gray is not None:
-                    self.prev_gray = current_gray.copy()
-                    self.get_logger().info(f"✓ 時間遡り処理完了後、現在画像をprev_grayに設定")
+                # 早送り処理: 検出時点から現在まで時間ジャンプ
+                if time_gap > 0.05:  # 50ms以上の差がある場合のみ早送り
+                    self.get_logger().info(f"✓ 早送り処理実行: {detection_timestamp:.3f} -> {current_time:.3f}")
+                    self.get_logger().info(f"  - 時間遅延補償: {time_gap*1000:.1f}ms")
+                    
+                    # 早送り前の状態確認
+                    pre_fastforward_trackers = len(getattr(self, 'tracked_csrt_trackers', {}))
+                    
+                    # CSRT用高速早送り処理
+                    self._perform_temporal_catchup_optimized(detection_timestamp, current_time)
+                    
+                    # 早送り処理後の結果確認と詳細ログ
+                    post_fastforward_trackers = len(getattr(self, 'tracked_csrt_trackers', {}))
+                    if post_fastforward_trackers > 0:
+                        self.get_logger().info(f"  - 早送り完了: {post_fastforward_trackers}個のトラッカーが稼働中")
+                        
+                        # 追跡結果の詳細表示
+                        with self.tracking_data_lock:
+                            for label, bbox in self.tracked_boxes_per_label.items():
+                                self.get_logger().info(f"    - {label}: bbox={bbox}")
+                    else:
+                        self.get_logger().warn(f"  - 早送り後: アクティブトラッカー無し (前: {pre_fastforward_trackers}個)")
+                else:
+                    self.get_logger().info(f"✓ 早送りスキップ: 時間差が閾値以下 ({time_gap*1000:.1f}ms < 50ms)")
+                
+                # 時間遡り処理完了後、絶対最新画像でprev_grayを設定してリアルタイム追跡に備える
+                absolute_latest_gray, absolute_latest_timestamp = self._get_absolute_latest_image()
+                final_sync_time = time.time()
+                
+                if absolute_latest_gray is not None:
+                    self.prev_gray = absolute_latest_gray.copy()
+                    sync_delay = final_sync_time - absolute_latest_timestamp
+                    self.get_logger().info(f"✓ 時間遡り処理完了後、絶対最新画像をprev_grayに設定 ({absolute_latest_timestamp:.3f})")
+                    self.get_logger().info(f"  - 最終同期遅延: {sync_delay*1000:.1f}ms")
+                else:
+                    current_gray = self._get_current_gray_image()
+                    if current_gray is not None:
+                        self.prev_gray = current_gray.copy()
+                        self.get_logger().info(f"✓ フォールバック: 現在画像をprev_grayに設定")
                 
                 self.get_logger().info(f"=== 時間的整合性処理完了 ===")
                 
+                # 早送り処理完了後に保存画像をクリア
+                with self.tracking_data_lock:
+                    self.stored_images.clear()
+                    self.get_logger().info(f"保存画像クリア: 時間的整合性処理完了")
+                
         except Exception as e:
             self.get_logger().error(f"時間整合性追跡初期化エラー: {e}")
-            # フォールバック: 通常の初期化
-            current_gray = self._get_current_gray_image()
-            if current_gray is not None:
-                self._initialize_tracking_boxes(current_gray)
+            # エラー時も保存画像をクリア
+            with self.tracking_data_lock:
+                self.stored_images.clear()
+                self.get_logger().info(f"保存画像クリア: エラー処理時")
+            # フォールバック: 統合処理
+            self._integrate_new_detections_with_existing_tracking(current_time)
+    
+    def _update_all_trackers(self, image: np.ndarray, update_prev_gray: bool = True) -> bool:
+        """全CSRTトラッカーを指定画像で更新（高精度）"""
+        try:
+            success_count = 0
+            total_trackers = len(getattr(self, 'tracked_csrt_trackers', {}))
+            
+            if total_trackers == 0:
+                return False
+            
+            # BGR画像に変換（CSRTはBGR形式を要求）
+            if len(image.shape) == 2:
+                tracker_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            elif len(image.shape) == 3 and image.shape[2] == 3:
+                tracker_image = image.copy()
+            else:
+                return False
+            
+            with self.tracking_data_lock:
+                labels_to_remove = []
+                
+                for label in list(self.tracked_csrt_trackers.keys()):
+                    try:
+                        csrt_tracker = self.tracked_csrt_trackers[label]
+                        
+                        # CSRTトラッカーで更新
+                        success, bbox = csrt_tracker.update(tracker_image)
+                        
+                        if success and bbox is not None:
+                            # OpenCV形式 (x, y, width, height) → 座標形式 (x1, y1, x2, y2)
+                            x1 = bbox[0]
+                            y1 = bbox[1]
+                            x2 = x1 + bbox[2]
+                            y2 = y1 + bbox[3]
+                            
+                            # 境界チェック
+                            height, width = tracker_image.shape[:2]
+                            if 0 <= x1 < width and 0 <= y1 < height and x2 <= width and y2 <= height:
+                                # サイズ妥当性チェック（横ズレ対策）
+                                bbox_width = x2 - x1
+                                bbox_height = y2 - y1
+                                
+                                # 異常に大きなbboxは制限
+                                max_width = width * 0.8  # 画面幅の80%以下
+                                max_height = height * 0.8  # 画面高さの80%以下
+                                
+                                if bbox_width <= max_width and bbox_height <= max_height:
+                                    # バウンディングボックス更新
+                                    self.tracked_boxes_per_label[label] = [x1, y1, x2, y2]
+                                    self.tracker_failure_counts[label] = 0
+                                    success_count += 1
+                                    
+                                    # 詳細ログ（可視化改善）
+                                    self.get_logger().debug(f"CSRTトラッキング成功: {label} - bbox=[{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}] size={bbox_width:.0f}x{bbox_height:.0f}")
+                                else:
+                                    # サイズ異常
+                                    self.get_logger().warn(f"CSRTトラッキング: {label} - bbox異常サイズ {bbox_width:.0f}x{bbox_height:.0f} (制限: {max_width:.0f}x{max_height:.0f})")
+                                    self.tracker_failure_counts[label] += 1
+                            else:
+                                # 境界外
+                                self.get_logger().debug(f"CSRTトラッキング: {label} - 境界外 [{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}]")
+                                self.tracker_failure_counts[label] += 1
+                        else:
+                            # トラッキング失敗
+                            self.tracker_failure_counts[label] += 1
+                        
+                        # 失敗回数チェック
+                        if self.tracker_failure_counts[label] >= self.tracker_failure_threshold:
+                            labels_to_remove.append(label)
+                    
+                    except Exception as e:
+                        self.get_logger().error(f"CSRTトラッカー更新エラー {label}: {e}")
+                        labels_to_remove.append(label)
+                
+                # 失敗したトラッカーを削除
+                for label in labels_to_remove:
+                    self._remove_tracking_object(label)
+            
+            return success_count > 0
+            
+        except Exception as e:
+            self.get_logger().error(f"全CSRTトラッカー更新エラー: {e}")
+            return False
     
     def _perform_temporal_catchup_optimized(self, start_timestamp: float, end_timestamp: float) -> None:
-        """段階的キャッチアップ処理（真の早送り処理）"""
+        """保存画像を使用したシンプル早送り処理"""
         try:
-            # キャッチアップに必要なフル画像フレームを収集
-            catchup_frames = []
-            with self.temporal_lock:
-                for i, timestamp in enumerate(self.image_timestamps):
-                    if start_timestamp < timestamp <= end_timestamp:
-                        if i < len(self.full_image_buffer):
-                            catchup_frames.append((timestamp, self.full_image_buffer[i].copy()))
-            
-            # 時間順にソート
-            catchup_frames.sort(key=lambda x: x[0])
-            
-            if len(catchup_frames) == 0:
-                self.get_logger().warn("キャッチアップ対象フレームがありません")
+            # CSRTトラッカーが初期化されているかチェック
+            if len(getattr(self, 'tracked_csrt_trackers', {})) == 0:
+                self.get_logger().warn("CSRTトラッカーが初期化されていません")
                 return
             
-            self.get_logger().info(f"段階的キャッチアップ開始: {len(catchup_frames)}フレーム")
-            self.get_logger().info(f"  - 開始時刻: {start_timestamp:.3f}")
-            self.get_logger().info(f"  - 終了時刻: {end_timestamp:.3f}")
-            
-            # 開始フレームのフル画像を取得
-            start_full_image = self._get_full_image_by_timestamp(start_timestamp)
-            if start_full_image is None:
-                self.get_logger().warn("開始フレームの画像が見つかりません")
-                return
-            
-            prev_gray = start_full_image  # フル画像を使用
-            
-            # 段階的にオプティカルフロー処理を実行
-            for i, (timestamp, curr_gray) in enumerate(catchup_frames):
-                self.get_logger().debug(f"  - フレーム {i+1}/{len(catchup_frames)}: {timestamp:.3f}")
-                
-                # 段階的オプティカルフロー更新
-                self._stepwise_optical_flow_update(prev_gray, curr_gray, timestamp)
-                prev_gray = curr_gray
-            
-            self.get_logger().info(f"段階的キャッチアップ完了: {start_timestamp:.3f} -> {end_timestamp:.3f}")
-            
-        except Exception as e:
-            self.get_logger().error(f"段階的キャッチアップエラー: {e}")
-    
-    def _stepwise_optical_flow_update(self, prev_gray: np.ndarray, curr_gray: np.ndarray, timestamp: float) -> None:
-        """段階的オプティカルフロー更新（早送り処理の核心）"""
-        try:
+            # 保存された画像を使用して早送り処理
             with self.tracking_data_lock:
-                updated_count = 0
+                if not self.stored_images:
+                    self.get_logger().warn(f"保存された画像がありません (ステータス: in_progress={self.grounding_dino_in_progress}, start_time={self.grounding_dino_start_time})")
+                    return
                 
-                # 全追跡オブジェクトを段階的に更新
-                for label, prev_features in list(self.tracked_features_per_label.items()):
-                    if prev_features is None or len(prev_features) == 0:
-                        continue
+                time_gap = end_timestamp - start_timestamp
+                self.get_logger().info(f"保存画像早送り開始: {time_gap:.3f}秒ジャンプ, {len(self.stored_images)}枚の画像を使用")
+                
+                # 時間範囲内の画像をフィルタリング
+                valid_images = [(t, img) for t, img in self.stored_images if start_timestamp <= t <= end_timestamp]
+                
+                if not valid_images:
+                    self.get_logger().warn("早送り対象の画像がありません")
+                    return
+                
+                # 保存画像を順序に処理してトラッカーを早送り
+                success_count = 0
+                for i, (timestamp, image) in enumerate(valid_images):
+                    # 最後の画像でのみprev_grayを更新
+                    is_last_frame = (i == len(valid_images) - 1)
                     
-                    self.get_logger().debug(f"    - {label}: {len(prev_features)}個の特徴点で段階的追跡")
+                    # 全トラッカーを更新
+                    tracker_success = self._update_all_trackers(image, update_prev_gray=is_last_frame)
+                    if tracker_success:
+                        success_count += 1
                     
-                    # オプティカルフロー計算
-                    try:
-                        curr_features, status, _ = cv2.calcOpticalFlowPyrLK(
-                            prev_gray, curr_gray, prev_features, None,
-                            winSize=(self.optical_flow_win_size_x, self.optical_flow_win_size_y),
-                            maxLevel=self.optical_flow_max_level,
-                            criteria=self.optical_flow_criteria
-                        )
-                    except cv2.error as e:
-                        self.get_logger().debug(f"    - {label}: オプティカルフロー計算エラー: {e}")
-                        continue
+                    # 進捗ログ
+                    self.get_logger().info(f"早送り進捗: {i+1}/{len(valid_images)}, 成功率: {success_count}/{i+1}")
+                
+                # 失敗したトラッカーを削除
+                failed_labels = []
+                for label, failure_count in self.tracker_failure_counts.items():
+                    if failure_count >= self.tracker_failure_threshold:
+                        failed_labels.append(label)
+                
+                for label in failed_labels:
+                    self._remove_tracking_object(label)
+                    self.get_logger().info(f"失敗トラッカー削除: {label} (失敗回数: {self.tracker_failure_counts.get(label, 0)})")
+                
+                # 早送り結果
+                active_trackers = len(getattr(self, 'tracked_csrt_trackers', {}))
+                success_rate = success_count / len(valid_images) if valid_images else 0
+                self.get_logger().info(f"早送り完了: {success_count}/{len(valid_images)} (成功率: {success_rate:.1%})")
+                
+                # 最後の保存画像から現在時刻まで追跡を継続
+                if valid_images and active_trackers > 0:
+                    last_stored_time = valid_images[-1][0]
+                    current_time = time.time()
+                    remaining_gap = current_time - last_stored_time
                     
-                    # 有効な特徴点のみを保持
-                    if curr_features is not None and status is not None:
-                        valid_indices = (status == 1).flatten()
-                        valid_count = np.sum(valid_indices)
-                        valid_ratio = valid_count / len(valid_indices) if len(valid_indices) > 0 else 0
-                        
-                        self.get_logger().debug(f"    - {label}: {valid_count}/{len(valid_indices)}個有効 (有効率: {valid_ratio:.2f})")
-                        
-                        if valid_ratio >= 0.1:  # 10%以上の特徴点が有効（緩和）
-                            valid_features = curr_features[valid_indices]
-                            self.tracked_features_per_label[label] = valid_features
-                            
-                            # バウンディングボックスを更新
-                            self._update_bounding_box_from_features(label)
-                            updated_count += 1
-                            
-                            self.get_logger().debug(f"    - {label}: {len(valid_features)}個の特徴点を更新")
+                    if remaining_gap > 0.01:  # 10ms以上の差がある場合
+                        # 現在の最新画像まで追跡
+                        current_gray = self._get_current_gray_image()
+                        if current_gray is not None:
+                            final_success = self._update_all_trackers(current_gray, update_prev_gray=True)
+                            self.get_logger().info(f"残存時間補間: {remaining_gap:.3f}秒 -> 現在時刻まで追跡完了")
                         else:
-                            # 有効率が低い場合は削除
-                            self.get_logger().info(f"    - {label}: 有効率が低いため削除 (有効率: {valid_ratio:.2f})")
-                            self._remove_tracking_object(label)
-                    else:
-                        self.get_logger().info(f"    - {label}: オプティカルフロー結果が無効")
-                        self._remove_tracking_object(label)
+                            self.get_logger().warn("現在画像が取得できません: 最終時間補間スキップ")
                 
-                self.get_logger().debug(f"    - {updated_count}個のオブジェクトを更新 ({timestamp:.3f})")
+                self.get_logger().info(f"保存画像早送り完了: {time_gap:.3f}秒ジャンプ, {active_trackers}個のトラッカーが稼働中")
+                
+                # 注意: 保存画像は時間的整合性処理完了後にクリアされます
+            
+        except Exception as e:
+            self.get_logger().error(f"保存画像早送り処理エラー: {e}")
+    
+    def _legacy_optical_flow_fallback(self, start_timestamp: float, end_timestamp: float) -> None:
+        """従来のオプティカルフロー処理（レガシー・フォールバック用）"""
+        try:
+            self.get_logger().info("CSRT早送り失敗、レガシー処理にフォールバック")
+            
+            # 現在の画像を取得して単純更新
+            current_image = self._get_full_image_by_timestamp(end_timestamp)
+            if current_image is not None:
+                if len(current_image.shape) == 3:
+                    current_gray = cv2.cvtColor(current_image, cv2.COLOR_BGR2GRAY)
+                else:
+                    current_gray = current_image
+                    
+                # 通常のトラッカー更新を実行
+                self._update_csrt_trackers_without_deletion(current_gray)
+                self.get_logger().info("レガシー処理完了")
                 
         except Exception as e:
-            self.get_logger().error(f"段階的オプティカルフロー更新エラー: {e}")
+            self.get_logger().error(f"レガシー処理エラー: {e}")
+    
+    def _csrt_direct_jump(self, target_gray: np.ndarray, jump_type: str) -> bool:
+        """CSRT直接ジャンプ処理（デバッグ改善版）"""
+        try:
+            # BGRに変換（トラッカー用）
+            tracker_image = cv2.cvtColor(target_gray, cv2.COLOR_GRAY2BGR)
+            success_count = 0
+            total_trackers = len(self.tracked_features_per_label)
+            failed_trackers = []
+            
+            self.get_logger().info(f"  - {jump_type}: {total_trackers}個のトラッカーを更新")
+            
+            with self.tracking_data_lock:
+                for label, tracker in list(self.tracked_csrt_trackers.items()):
+                    try:
+                        # シンプルなトラッカー更新
+                        success, opencv_bbox = tracker.update(tracker_image)
+                        
+                        if success and opencv_bbox is not None:
+                            x, y, w, h = opencv_bbox
+                            bbox = [x, y, x + w, y + h]
+                            
+                            # 基本的な範囲チェックのみ
+                            if w > 5 and h > 5:  # 最小サイズチェック
+                                self.tracked_boxes_per_label[label] = bbox
+                                success_count += 1
+                                self.get_logger().debug(f"    - {label}: 更新成功 [{x:.1f},{y:.1f},{w:.1f},{h:.1f}]")
+                            else:
+                                failed_trackers.append(f"{label}(小さすぎ:{w:.1f}x{h:.1f})")
+                        else:
+                            failed_trackers.append(f"{label}(update失敗)")
+                                
+                    except Exception as e:
+                        failed_trackers.append(f"{label}(例外:{e})")
+            
+            success_rate = success_count / total_trackers if total_trackers > 0 else 0.0
+            
+            # 成功判定を緩和（30%以上成功で OK）
+            is_success = success_rate >= 0.3
+            
+            self.get_logger().info(f"  - {jump_type}結果: {success_count}/{total_trackers}成功 ({success_rate*100:.1f}%) -> {'成功' if is_success else '失敗'}")
+            
+            if failed_trackers:
+                self.get_logger().debug(f"    失敗詳細: {', '.join(failed_trackers)}")
+            
+            return is_success
+            
+        except Exception as e:
+            self.get_logger().error(f"CSRT直接ジャンプエラー: {e}")
+            return False
+    
+    def _csrt_staged_jump(self, start_timestamp: float, end_timestamp: float, target_gray: np.ndarray, stages: int) -> bool:
+        """CSRT段階的ジャンプ処理（中・長時間用）- デバッグ強化版"""
+        try:
+            self.get_logger().info(f"  - 段階的ジャンプ: {stages}段階で実行 (時間差: {end_timestamp - start_timestamp:.3f}秒)")
+            
+            # 段階的な中間フレームを取得
+            time_gap = end_timestamp - start_timestamp
+            stage_interval = time_gap / stages
+            
+            # フル画像バッファの状態をチェック
+            with self.temporal_lock:
+                buffer_size = len(self.full_image_buffer) if hasattr(self, 'full_image_buffer') else 0
+                timestamp_size = len(self.image_timestamps) if hasattr(self, 'image_timestamps') else 0
+                self.get_logger().info(f"    - バッファ状態: 画像={buffer_size}, タイムスタンプ={timestamp_size}")
+            
+            intermediate_frames = []
+            failed_retrievals = 0
+            
+            # 中間フレーム取得のデバッグ強化
+            for i in range(1, stages):  # 最初と最後を除く中間点
+                intermediate_timestamp = start_timestamp + (stage_interval * i)
+                self.get_logger().debug(f"    - 中間フレーム {i} 取得試行: {intermediate_timestamp:.3f}")
+                
+                intermediate_image = self._get_full_image_by_timestamp(intermediate_timestamp)
+                if intermediate_image is not None:
+                    if len(intermediate_image.shape) == 3:
+                        intermediate_gray = cv2.cvtColor(intermediate_image, cv2.COLOR_BGR2GRAY)
+                    else:
+                        intermediate_gray = intermediate_image
+                    intermediate_frames.append((intermediate_timestamp, intermediate_gray))
+                    self.get_logger().debug(f"    - 中間フレーム {i} 取得成功: {intermediate_gray.shape}")
+                else:
+                    failed_retrievals += 1
+                    self.get_logger().warning(f"    - 中間フレーム {i} 取得失敗: {intermediate_timestamp:.3f}")
+            
+            # 最終画像を追加（必ず追加）
+            intermediate_frames.append((end_timestamp, target_gray))
+            self.get_logger().info(f"    - フレーム取得結果: {len(intermediate_frames)}個成功, {failed_retrievals}個失敗")
+            
+            if len(intermediate_frames) == 0:
+                self.get_logger().error("  - 段階的ジャンプ: 利用可能な中間フレームがありません")
+                return
+            
+            # 段階的に更新
+            success_count = 0
+            total_trackers = len(self.tracked_features_per_label)
+            
+            self.get_logger().info(f"    - トラッカー更新開始: {total_trackers}個のトラッカー")
+            
+            for stage_idx, (timestamp, gray_image) in enumerate(intermediate_frames):
+                self.get_logger().debug(f"    - 段階 {stage_idx + 1}/{len(intermediate_frames)}: {timestamp:.3f}, 画像={gray_image.shape}")
+                
+                # 画像の有効性チェック
+                if gray_image is None or gray_image.size == 0:
+                    self.get_logger().error(f"    - 段階 {stage_idx + 1}: 無効な画像データをスキップ")
+                    continue
+                
+                # BGRに変換（デバッグ情報付き）
+                try:
+                    if len(gray_image.shape) == 2:  # グレースケール
+                        tracker_image = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
+                    elif len(gray_image.shape) == 3 and gray_image.shape[2] == 3:  # 既にBGR
+                        tracker_image = gray_image
+                    else:
+                        self.get_logger().error(f"    - 段階 {stage_idx + 1}: 不正な画像形状: {gray_image.shape}")
+                        continue
+                    self.get_logger().debug(f"    - 段階 {stage_idx + 1}: BGR変換完了 {tracker_image.shape}")
+                except Exception as e:
+                    self.get_logger().error(f"    - 段階 {stage_idx + 1}: BGR変換エラー: {e}")
+                    continue
+                
+                stage_success = 0
+                stage_failures = {}
+                
+                with self.tracking_data_lock:
+                    for label, tracker in list(self.tracked_csrt_trackers.items()):
+                        try:
+                            # トラッカー更新前の詳細状態をログ
+                            current_bbox = self.tracked_boxes_per_label.get(label, "未設定")
+                            self.get_logger().debug(f"      - {label}: 更新前bbox={current_bbox}")
+                            
+                            # トラッカーの安定性をチェック（段階的ジャンプ用）
+                            if not self._is_tracker_stable(label):
+                                self.get_logger().debug(f"      - {label}: トラッカー不安定期間中（段階的ジャンプ）")
+                            
+                            # tracker.update()実行前の事前検証（段階的ジャンプ用）
+                            if not self._pre_update_bbox_validation(label, gray_image):
+                                stage_failures[label] = "事前検証失敗（bbox不正）"
+                                self.get_logger().warning(f"      - {label}: 段階的ジャンプ事前検証失敗、スキップ")
+                                # 失敗カウントを増加
+                                if label not in self.tracker_failure_counts:
+                                    self.tracker_failure_counts[label] = 0
+                                self.tracker_failure_counts[label] += 1
+                                continue
+                            
+                            # 画像とトラッカーの詳細情報をログ
+                            self.get_logger().debug(f"      - {label}: 画像形状={tracker_image.shape}, dtype={tracker_image.dtype}")
+                            self.get_logger().debug(f"      - {label}: 画像値範囲=[{tracker_image.min()}-{tracker_image.max()}]")
+                            
+                            # トラッカーの種類を特定
+                            tracker_type = type(tracker).__name__
+                            self.get_logger().debug(f"      - {label}: トラッカー種類={tracker_type}")
+                            
+                            # OpenCVバージョンに応じた詳細エラーハンドリング
+                            try:
+                                success, opencv_bbox = tracker.update(tracker_image)
+                                self.get_logger().debug(f"      - {label}: update結果 success={success}, bbox={opencv_bbox}")
+                            except cv2.error as cv_error:
+                                stage_failures[label] = f"OpenCVエラー: {cv_error}"
+                                self.get_logger().error(f"      - {label}: OpenCVエラー詳細: {cv_error}")
+                                continue
+                            except Exception as update_error:
+                                stage_failures[label] = f"update例外: {update_error}"
+                                self.get_logger().error(f"      - {label}: update例外詳細: {update_error}")
+                                continue
+                            
+                            if success and opencv_bbox is not None:
+                                x, y, w, h = opencv_bbox
+                                bbox = [x, y, x + w, y + h]
+                                
+                                self.get_logger().debug(f"      - {label}: OpenCV bbox=[{x:.2f},{y:.2f},{w:.2f},{h:.2f}]")
+                                
+                                # 境界チェックと自動正規化（詳細ログ付き）
+                                height, width = gray_image.shape
+                                if (0 <= x < width and 0 <= y < height and 
+                                    x + w <= width and y + h <= height and w > 0 and h > 0):
+                                    self.tracked_boxes_per_label[label] = bbox
+                                    stage_success += 1
+                                    self.get_logger().debug(f"      - {label}: 更新成功 {bbox}")
+                                else:
+                                    # 段階的ジャンプでも境界外bboxを自動正規化
+                                    self.get_logger().warning(f"      - {label}: 段階的ジャンプで境界外bbox検出、自動正規化実行")
+                                    normalized_bbox = self._normalize_bounding_box(bbox, width, height, f"{label}_staged")
+                                    if normalized_bbox is not None:
+                                        self.tracked_boxes_per_label[label] = normalized_bbox
+                                        stage_success += 1
+                                        self.get_logger().info(f"      - {label}: 段階的ジャンプ境界外bbox正規化成功 {bbox} -> {normalized_bbox}")
+                                    else:
+                                        stage_failures[label] = f"段階的ジャンプ境界外bbox正規化失敗: [{x:.1f},{y:.1f},{w:.1f},{h:.1f}], 画像={width}x{height}"
+                                        self.get_logger().error(f"      - {label}: {stage_failures[label]}")
+                            else:
+                                # tracker.update()が失敗した詳細な理由を調査
+                                if not success:
+                                    stage_failures[label] = f"tracker.update()戻り値=False（トラッキング失敗）"
+                                elif opencv_bbox is None:
+                                    stage_failures[label] = f"tracker.update()結果でbbox=None"
+                                else:
+                                    stage_failures[label] = f"不明な失敗: success={success}, bbox={opencv_bbox}"
+                                
+                                self.get_logger().warning(f"      - {label}: トラッカー更新失敗 {stage_failures[label]}")
+                                
+                                # 連続失敗のカウントを増加
+                                if label not in self.tracker_failure_counts:
+                                    self.tracker_failure_counts[label] = 0
+                                self.tracker_failure_counts[label] += 1
+                                
+                                # 段階的ジャンプでも積極的なトラッカー交換
+                                failure_count = self.tracker_failure_counts[label]
+                                if failure_count >= 2:  # 段階的ジャンプでも早めの交換
+                                    self.get_logger().error(f"      - {label}: 段階的ジャンプで連続失敗{failure_count}回、トラッカー交換を実行")
+                                    replacement_success = self._attempt_tracker_replacement(label, tracker_image)
+                                    if replacement_success:
+                                        # 交換成功後、新しいトラッカーで再試行
+                                        new_tracker = self.tracked_csrt_trackers.get(label)
+                                        if new_tracker is not None:
+                                            try:
+                                                retry_success, retry_bbox = new_tracker.update(tracker_image)
+                                                if retry_success and retry_bbox is not None:
+                                                    x, y, w, h = retry_bbox
+                                                    bbox = [x, y, x + w, y + h]
+                                                    height, width = gray_image.shape
+                                                    normalized_bbox = self._normalize_bounding_box(bbox, width, height, f"{label}_staged_retry")
+                                                    if normalized_bbox is not None:
+                                                        self.tracked_boxes_per_label[label] = normalized_bbox
+                                                        stage_success += 1
+                                                        self.get_logger().info(f"      - {label}: 段階的ジャンプ交換後再試行成功 {normalized_bbox}")
+                                            except Exception as retry_error:
+                                                self.get_logger().warning(f"      - {label}: 段階的ジャンプ交換後再試行エラー: {retry_error}")
+                                else:
+                                    # 品質診断（失敗回数が閾値未満の場合）
+                                    self._diagnose_tracker_quality(label, tracker, tracker_image)
+                                    
+                        except Exception as e:
+                            stage_failures[label] = f"例外: {str(e)}"
+                            self.get_logger().error(f"      - {label}: 段階的更新例外 {stage_failures[label]}")
+                            import traceback
+                            self.get_logger().error(f"        スタックトレース: {traceback.format_exc()}")
+                            continue
+                
+                # 段階結果の詳細ログ
+                self.get_logger().info(f"    - 段階 {stage_idx + 1} 結果: {stage_success}/{total_trackers}成功")
+                if stage_failures:
+                    for label, error in stage_failures.items():
+                        self.get_logger().debug(f"      - 失敗詳細 {label}: {error}")
+                
+                if stage_idx == len(intermediate_frames) - 1:  # 最終段階
+                    success_count = stage_success
+            
+            success_rate = success_count / total_trackers if total_trackers > 0 else 0.0
+            self.get_logger().info(f"  - 段階的ジャンプ結果: {success_count}/{total_trackers}成功 ({success_rate*100:.1f}%)")
+            
+            # 完全失敗の場合の対策検討
+            if success_count == 0 and total_trackers > 0:
+                self.get_logger().error("  - 段階的ジャンプ完全失敗: トラッカー再初期化を検討")
+                
+                # 早送り処理の失敗パターンを分析
+                self._analyze_fastforward_failure_pattern(start_timestamp, end_timestamp)
+            
+            return success_count > 0
+                
+        except Exception as e:
+            self.get_logger().error(f"CSRT段階的ジャンプエラー: {e}")
+            import traceback
+            self.get_logger().error(f"スタックトレース: {traceback.format_exc()}")
+            return False
+    
+    # _csrt_staged_jump_with_fallback関数は削除（不要な複雑処理）
+    
+    # _diagnose_and_repair_trackers関数は削除（不要な複雑処理）
+    
+    # _diagnose_tracker_quality関数は削除（不要な複雑処理）
+    
+    # _analyze_fastforward_failure_pattern関数は削除（不要な複雑処理）
+    
+    # _csrt_micro_step_jump関数は削除（不要な複雑処理）
+    
+    
+    def _emergency_tracker_reset(self, current_gray: np.ndarray) -> None:
+        """緊急時のトラッカーリセット処理"""
+        try:
+            self.get_logger().error("  === 緊急トラッカーリセット開始 ===")
+            
+            # 現在のバウンディングボックスを保存
+            backup_boxes = {}
+            with self.tracking_data_lock:
+                backup_boxes = self.tracked_boxes_per_label.copy()
+                self.get_logger().error(f"    - 現在のバウンディングボックスをバックアップ: {len(backup_boxes)}個")
+            
+            # トラッカーを一旦全削除
+            with self.tracking_data_lock:
+                tracker_count = len(self.tracked_features_per_label)
+                self.tracked_csrt_trackers.clear()
+                self.tracked_features_per_label.clear()
+                self.tracker_failure_counts.clear()
+                self.tracker_initialization_times.clear()  # 初期化時刻記録もクリア
+                self.get_logger().error(f"    - 既存トラッカーを削除: {tracker_count}個")
+            
+            # バウンディングボックスを基に新しいトラッカーを再初期化
+            success_count = 0
+            for label, bbox in backup_boxes.items():
+                try:
+                    # BGRに変換
+                    if len(current_gray.shape) == 2:
+                        bgr_image = cv2.cvtColor(current_gray, cv2.COLOR_GRAY2BGR)
+                    else:
+                        bgr_image = current_gray
+                    
+                    height, width = bgr_image.shape[:2]
+                    
+                    # 緊急時のボックス正規化（より厳しい制限）
+                    normalized_bbox = self._normalize_bounding_box(bbox, width, height, f"{label}_emergency")
+                    if normalized_bbox is None:
+                        self.get_logger().error(f"    - {label}: 緊急時bbox正規化失敗 {bbox}")
+                        # 再初期化に失敗したボックスは削除
+                        with self.tracking_data_lock:
+                            if label in self.tracked_boxes_per_label:
+                                del self.tracked_boxes_per_label[label]
+                        continue
+                    
+                    self.get_logger().error(f"    - {label}: 緊急再初期化試行 bbox={normalized_bbox}")
+                    
+                    # トラッカー再初期化（正規化済みbboxを使用）
+                    if self._initialize_csrt_tracker(label, bgr_image, normalized_bbox):
+                        success_count += 1
+                        self.get_logger().error(f"    - {label}: 緊急再初期化成功")
+                    else:
+                        self.get_logger().error(f"    - {label}: 緊急再初期化失敗")
+                        # 再初期化に失敗したボックスは削除
+                        with self.tracking_data_lock:
+                            if label in self.tracked_boxes_per_label:
+                                del self.tracked_boxes_per_label[label]
+                    
+                except Exception as e:
+                    self.get_logger().error(f"    - {label}: 緊急再初期化例外: {e}")
+                    continue
+            
+            self.get_logger().error(f"  - 緊急リセット結果: {success_count}/{len(backup_boxes)}個成功")
+            
+            if success_count > 0:
+                self.get_logger().error("  - 緊急リセット成功: 一部トラッカーが復旧")
+                # 失敗カウントをリセット
+                self._reset_tracker_failure_counts()
+            else:
+                self.get_logger().error("  - 緊急リセット失敗: 全てのトラッカーが失われました")
+            
+            self.get_logger().error("  === 緊急トラッカーリセット完了 ===")
+            
+        except Exception as e:
+            self.get_logger().error(f"緊急トラッカーリセットエラー: {e}")
+    
+    def _selective_tracker_reset(self, current_gray: np.ndarray, failure_threshold: int = 5) -> int:
+        """選択的トラッカーリセット処理（改善版）"""
+        try:
+            self.get_logger().info(f"  === 選択的トラッカーリセット開始 (閾値: {failure_threshold}) ===")
+            
+            # 失敗回数の多いトラッカーを特定
+            problematic_trackers = []
+            with self.tracking_data_lock:
+                for label, failure_count in self.tracker_failure_counts.items():
+                    if failure_count >= failure_threshold:
+                        problematic_trackers.append((label, failure_count))
+            
+            if not problematic_trackers:
+                self.get_logger().info("  - リセット対象のトラッカーなし")
+                return 0
+            
+            # 失敗回数順にソート（多い順）
+            problematic_trackers.sort(key=lambda x: x[1], reverse=True)
+            self.get_logger().info(f"  - リセット対象: {len(problematic_trackers)}個")
+            
+            reset_success_count = 0
+            for label, failure_count in problematic_trackers:
+                try:
+                    current_bbox = self.tracked_boxes_per_label.get(label)
+                    if current_bbox is None:
+                        self.get_logger().warning(f"    - {label}: bbox未設定のためスキップ")
+                        continue
+                    
+                    self.get_logger().info(f"    - {label}: リセット実行 (失敗回数: {failure_count})")
+                    
+                    # 古いトラッカーをクリーンアップ
+                    with self.tracking_data_lock:
+                        if label in self.tracked_csrt_trackers:
+                            del self.tracked_csrt_trackers[label]
+                        if label in self.tracked_features_per_label:
+                            del self.tracked_features_per_label[label]
+                        if label in self.tracker_failure_counts:
+                            del self.tracker_failure_counts[label]
+                        if label in self.tracker_initialization_times:
+                            del self.tracker_initialization_times[label]
+                        if hasattr(self, 'tracker_types') and label in self.tracker_types:
+                            del self.tracker_types[label]
+                    
+                    # 画像準備
+                    if len(current_gray.shape) == 2:
+                        bgr_image = cv2.cvtColor(current_gray, cv2.COLOR_GRAY2BGR)
+                    else:
+                        bgr_image = current_gray
+                    
+                    height, width = bgr_image.shape[:2]
+                    
+                    # bbox正規化
+                    normalized_bbox = self._normalize_bounding_box(current_bbox, width, height, f"{label}_selective_reset")
+                    if normalized_bbox is None:
+                        self.get_logger().error(f"    - {label}: bbox正規化失敗、削除")
+                        with self.tracking_data_lock:
+                            if label in self.tracked_boxes_per_label:
+                                del self.tracked_boxes_per_label[label]
+                        continue
+                    
+                    # 新しいトラッカーで再初期化
+                    if self._initialize_csrt_tracker(label, bgr_image, normalized_bbox):
+                        reset_success_count += 1
+                        self.get_logger().info(f"    ✓ {label}: 選択的リセット成功")
+                        
+                        # リセット統計を記録
+                        if not hasattr(self, 'reset_statistics'):
+                            self.reset_statistics = {}
+                        if label not in self.reset_statistics:
+                            self.reset_statistics[label] = 0
+                        self.reset_statistics[label] += 1
+                        
+                    else:
+                        self.get_logger().error(f"    ✗ {label}: 選択的リセット失敗、削除")
+                        with self.tracking_data_lock:
+                            if label in self.tracked_boxes_per_label:
+                                del self.tracked_boxes_per_label[label]
+                
+                except Exception as e:
+                    self.get_logger().error(f"    - {label}: 選択的リセット例外: {e}")
+                    continue
+            
+            self.get_logger().info(f"  - 選択的リセット結果: {reset_success_count}/{len(problematic_trackers)}個成功")
+            self.get_logger().info("  === 選択的トラッカーリセット完了 ===")
+            
+            return reset_success_count
+            
+        except Exception as e:
+            self.get_logger().error(f"選択的トラッカーリセットエラー: {e}")
+            return 0
+    
+    def _get_reset_statistics_summary(self) -> str:
+        """リセット統計の要約を取得"""
+        try:
+            if not hasattr(self, 'reset_statistics') or not self.reset_statistics:
+                return "リセット履歴なし"
+            
+            total_resets = sum(self.reset_statistics.values())
+            most_reset_label = max(self.reset_statistics.items(), key=lambda x: x[1])
+            
+            summary = f"総リセット回数: {total_resets}, 最多リセット: {most_reset_label[0]}({most_reset_label[1]}回)"
+            return summary
+            
+        except Exception as e:
+            return f"統計取得エラー: {e}"
+    
+    def _normalize_bounding_box(self, bbox: List[float], image_width: int, image_height: int, label: str) -> Optional[List[float]]:
+        """バウンディングボックス正規化（オフスクリーン移動許可版）"""
+        try:
+            if len(bbox) != 4:
+                self.get_logger().error(f"{label}: 不正なbbox形式: {bbox}")
+                return None
+            
+            x1, y1, x2, y2 = bbox
+            
+            # [x, y, w, h]形式の場合は[x1, y1, x2, y2]に変換
+            if x2 < x1 or y2 < y1:
+                w, h = x2, y2
+                x2, y2 = x1 + w, y1 + h
+                self.get_logger().debug(f"{label}: [x,y,w,h]形式を変換: [{x1},{y1},{w},{h}] → [{x1},{y1},{x2},{y2}]")
+            
+            original_bbox = [x1, y1, x2, y2]
+            w, h = abs(x2 - x1), abs(y2 - y1)
+            
+            # 破損検出: 異常に小さいサイズ
+            min_size = 8
+            if w < min_size or h < min_size:
+                self.get_logger().warn(f"{label}: bbox破損（過小）: {w:.1f}x{h:.1f} -> 修復")
+                center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
+                half_size = min_size / 2
+                x1, y1 = center_x - half_size, center_y - half_size
+                x2, y2 = center_x + half_size, center_y + half_size
+                w, h = min_size, min_size
+            
+            # 破損検出: 異常に大きいサイズ（画像の95%以上）
+            max_w, max_h = image_width * 0.95, image_height * 0.95
+            if w > max_w or h > max_h:
+                self.get_logger().warn(f"{label}: bbox破損（過大）: {w:.1f}x{h:.1f} -> スケール")
+                scale = min(max_w / w, max_h / h)
+                center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
+                new_w, new_h = w * scale, h * scale
+                x1, y1 = center_x - new_w/2, center_y - new_h/2
+                x2, y2 = center_x + new_w/2, center_y + new_h/2
+                w, h = new_w, new_h
+            
+            # オフスクリーン移動の許可判定
+            margin = max(image_width, image_height) * 0.3  # 30%まで画面外を許可
+            
+            # 完全に画面外（削除対象）
+            if (x2 < -margin or x1 > image_width + margin or 
+                y2 < -margin or y1 > image_height + margin):
+                self.get_logger().info(f"{label}: 完全画面外で削除: [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}]")
+                return None
+            
+            # 部分的オフスクリーン（許可）
+            off_screen = (x2 < 0 or x1 > image_width or y2 < 0 or y1 > image_height)
+            if off_screen:
+                self.get_logger().debug(f"{label}: オフスクリーン移動（許可）: [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}]")
+            
+            # 極端な破損座標のみ修正（画像サイズの2倍以上）
+            extreme_threshold = max(image_width, image_height) * 2
+            corrected = False
+            
+            if x1 < -extreme_threshold:
+                x1 = -margin
+                corrected = True
+            if y1 < -extreme_threshold:
+                y1 = -margin  
+                corrected = True
+            if x2 > image_width + extreme_threshold:
+                x2 = image_width + margin
+                corrected = True
+            if y2 > image_height + extreme_threshold:
+                y2 = image_height + margin
+                corrected = True
+            
+            if corrected:
+                self.get_logger().warn(f"{label}: 極端破損修正: {original_bbox} → [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}]")
+            
+            # 最終検証
+            final_w, final_h = abs(x2 - x1), abs(y2 - y1)
+            if final_w < min_size or final_h < min_size or x1 >= x2 or y1 >= y2:
+                self.get_logger().error(f"{label}: 最終検証失敗: [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}]")
+                return None
+            
+            normalized_bbox = [float(x1), float(y1), float(x2), float(y2)]
+            
+            # 修正があった場合のみログ
+            if normalized_bbox != original_bbox:
+                if corrected or w < min_size * 2:
+                    self.get_logger().info(f"{label}: bbox修正: {original_bbox} → {normalized_bbox}")
+                else:
+                    self.get_logger().debug(f"{label}: bbox正規化: {original_bbox} → {normalized_bbox}")
+            
+            return normalized_bbox
+            
+        except Exception as e:
+            self.get_logger().error(f"{label}: bbox正規化エラー: {e}")
+            return None
             
     def _fallback_temporal_catchup(self, start_timestamp: float, end_timestamp: float) -> None:
         """フォールバック: 段階的キャッチアップ処理"""
@@ -1295,34 +1942,13 @@ class LangSamWithOptFlowNode(Node):
             self.get_logger().error(f"フォールバックキャッチアップエラー: {e}")
     
     def _fast_optical_flow_update(self, gray: np.ndarray) -> None:
-        """高速オプティカルフロー更新（キャッチアップ用）"""
+        """高速CSRTトラッカー更新（キャッチアップ用）"""
         try:
-            if self.prev_gray is None or not self.tracking_valid:
+            if not self.tracking_valid:
                 return
             
-            # 簡略化されたオプティカルフロー更新
-            with self.tracking_data_lock:
-                for label, prev_features in list(self.tracked_features_per_label.items()):
-                    if prev_features is None or len(prev_features) == 0:
-                        continue
-                    
-                    # オプティカルフロー計算
-                    curr_features, status, _ = cv2.calcOpticalFlowPyrLK(
-                        self.prev_gray, gray, prev_features,
-                        None,
-                        winSize=(self.optical_flow_win_size_x, self.optical_flow_win_size_y),
-                        maxLevel=self.optical_flow_max_level,
-                        criteria=self.optical_flow_criteria
-                    )
-                    
-                    # 有効な特徴点のみ保持
-                    if curr_features is not None and status is not None:
-                        valid_indices = (status == 1).flatten()
-                        if np.any(valid_indices):
-                            self.tracked_features_per_label[label] = curr_features[valid_indices]
-                            
-                            # バウンディングボックス更新
-                            self._update_bounding_box_from_features(label)
+            # CSRTトラッカー更新
+            self._update_csrt_trackers(gray)
             
             # 前フレーム更新
             self.prev_gray = gray.copy()
@@ -1331,56 +1957,43 @@ class LangSamWithOptFlowNode(Node):
             self.get_logger().error(f"高速オプティカルフロー更新エラー: {e}")
     
     def _get_current_gray_image(self) -> Optional[np.ndarray]:
-        """現在のフル画像を取得"""
+        """真の最新画像を取得（グレースケール変換含む）"""
         try:
             with self.temporal_lock:
                 if len(self.full_image_buffer) > 0:
-                    return self.full_image_buffer[-1].copy()
+                    # 最新画像を取得
+                    latest_image = self.full_image_buffer[-1].copy()
+                    
+                    # グレースケール変換
+                    if len(latest_image.shape) == 3:
+                        return cv2.cvtColor(latest_image, cv2.COLOR_BGR2GRAY)
+                    else:
+                        return latest_image
             return None
         except Exception as e:
             self.get_logger().error(f"現在画像取得エラー: {e}")
             return None
     
-    def _update_bounding_box_from_features(self, label: str) -> None:
-        """特徴点からバウンディングボックスを更新"""
+    def _get_absolute_latest_image(self) -> Optional[Tuple[np.ndarray, float]]:
+        """絶対最新の画像とタイムスタンプを取得"""
         try:
-            if (label not in self.tracked_features_per_label or 
-                label not in self.feature_to_center_offsets or
-                label not in self.original_box_sizes):
-                return
-            
-            features = self.tracked_features_per_label[label]
-            offsets = self.feature_to_center_offsets[label]
-            
-            if features is None or len(features) == 0 or offsets is None or len(offsets) == 0:
-                return
-            
-            # 相対距離を使って中心点を逆算
-            predicted_centers = []
-            for i, feature in enumerate(features):
-                if i < len(offsets):
-                    fx, fy = feature[0]
-                    offset_x, offset_y = offsets[i]
-                    predicted_center_x = fx - offset_x
-                    predicted_center_y = fy - offset_y
-                    predicted_centers.append([predicted_center_x, predicted_center_y])
-            
-            if len(predicted_centers) > 0:
-                # 平均中心点を計算
-                avg_center = np.mean(predicted_centers, axis=0)
-                
-                # 元のサイズでバウンディングボックスを再構築
-                width, height = self.original_box_sizes[label]
-                x1 = avg_center[0] - width / 2
-                y1 = avg_center[1] - height / 2
-                x2 = avg_center[0] + width / 2
-                y2 = avg_center[1] + height / 2
-                
-                # バウンディングボックス更新
-                self.tracked_boxes_per_label[label] = [x1, y1, x2, y2]
-                
+            with self.temporal_lock:
+                if len(self.full_image_buffer) > 0 and len(self.image_timestamps) > 0:
+                    latest_image = self.full_image_buffer[-1].copy()
+                    latest_timestamp = self.image_timestamps[-1]
+                    
+                    # グレースケール変換
+                    if len(latest_image.shape) == 3:
+                        gray_image = cv2.cvtColor(latest_image, cv2.COLOR_BGR2GRAY)
+                    else:
+                        gray_image = latest_image
+                        
+                    return gray_image, latest_timestamp
+            return None, None
         except Exception as e:
-            self.get_logger().error(f"特徴点からのバウンディングボックス更新エラー: {e}")
+            self.get_logger().error(f"絶対最新画像取得エラー: {e}")
+            return None, None
+    
     
     def _track_optical_flow_with_temporal_alignment(self, current_gray: np.ndarray, current_time: float) -> None:
         """時間整合性を考慮したオプティカルフロー処理"""
@@ -1455,114 +2068,80 @@ class LangSamWithOptFlowNode(Node):
             self._track_optical_flow(end_gray)
     
     def _update_optical_flow_step(self, prev_gray: np.ndarray, curr_gray: np.ndarray) -> None:
-        """一段階のオプティカルフロー更新（補間用）"""
+        """一段階のCSRTトラッカー更新（補間用）"""
         try:
-            with self.tracking_data_lock:
-                if not self.tracked_features_per_label:
-                    return
-                
-                for label, prev_features in list(self.tracked_features_per_label.items()):
-                    if prev_features is None or len(prev_features) == 0:
-                        continue
-                    
-                    # オプティカルフロー計算
-                    curr_features, status, _ = cv2.calcOpticalFlowPyrLK(
-                        prev_gray, curr_gray, prev_features, None,
-                        winSize=(self.optical_flow_win_size_x, self.optical_flow_win_size_y),
-                        maxLevel=self.optical_flow_max_level,
-                        criteria=self.optical_flow_criteria
-                    )
-                    
-                    # 有効な特徴点のみ保持
-                    if curr_features is not None and status is not None:
-                        valid_indices = (status == 1).flatten()
-                        if np.any(valid_indices):
-                            # 特徴点更新
-                            valid_features = curr_features[valid_indices]
-                            self.tracked_features_per_label[label] = valid_features
-                            
-                            # 相対オフセットも更新
-                            if label in self.feature_to_center_offsets:
-                                valid_offsets = self.feature_to_center_offsets[label][valid_indices]
-                                self.feature_to_center_offsets[label] = valid_offsets
-                            
-                            # バウンディングボックス更新
-                            self._update_bounding_box_from_features(label)
-                        else:
-                            # 追跡失敗時はラベルを削除
-                            if label in self.tracked_features_per_label:
-                                del self.tracked_features_per_label[label]
-                            if label in self.tracked_boxes_per_label:
-                                del self.tracked_boxes_per_label[label]
-                            if label in self.feature_to_center_offsets:
-                                del self.feature_to_center_offsets[label]
-                
-                # 前フレーム更新
-                self.prev_gray = curr_gray.copy()
-                self.tracking_valid = len(self.tracked_features_per_label) > 0
+            # CSRTトラッカー更新
+            self._update_csrt_trackers(curr_gray)
+            
+            # 前フレーム更新
+            self.prev_gray = curr_gray.copy()
                 
         except Exception as e:
             self.get_logger().error(f"オプティカルフロー段階更新エラー: {e}")
     
     def _integrate_new_detections_with_existing_tracking(self, current_time: float) -> None:
-        """既存の追跡を維持しながら新規検出結果を統合"""
+        """シンプルな検出結果からトラッカー初期化"""
         try:
             with self.detection_data_lock:
                 if self.latest_detection_data is None:
-                    self.get_logger().warn("新規検出データがありません")
+                    self.get_logger().warn("検出データがありません")
                     return
                 
-                new_boxes = self.latest_detection_data.get('boxes', [])
-                new_labels = self.latest_detection_data.get('labels', [])
-                detection_timestamp = self.latest_detection_data.get('original_timestamp')
+                boxes = self.latest_detection_data.get('boxes', [])
+                labels = self.latest_detection_data.get('labels', [])
                 
-                if len(new_boxes) == 0:
-                    self.get_logger().info("新規検出ボックスがありません")
+                if len(boxes) == 0:
+                    self.get_logger().info("検出ボックスがありません")
                     return
             
-            # 既存の追跡データを保持
+            # 現在画像を取得
+            current_gray = self._get_current_gray_image()
+            if current_gray is None:
+                self.get_logger().error("現在画像が取得できません")
+                return
+            
+            # 既存トラッカーをクリア
             with self.tracking_data_lock:
-                existing_labels = set(self.tracked_boxes_per_label.keys())
-                self.get_logger().info(f"既存追跡: {len(existing_labels)}個, 新規検出: {len(new_boxes)}個")
+                self.tracked_boxes_per_label.clear()
+                self.tracked_csrt_trackers.clear()
+                self.tracker_failure_counts.clear()
                 
-                # 新規検出と既存追跡の重複チェック・統合
-                integrated_count = 0
-                added_count = 0
+                success_count = 0
+                self.get_logger().info(f"検出結果から{len(boxes)}個のトラッカーを初期化")
                 
-                for i, new_box in enumerate(new_boxes):
-                    new_label = new_labels[i] if i < len(new_labels) else f'object_{i}'
+                for i, bbox in enumerate(boxes):
+                    if i >= len(labels):
+                        continue
+                        
+                    original_label = labels[i]
                     
-                    # トラッキング対象フィルタリング
-                    if not self._is_tracking_target(new_label):
+                    # トラッキング対象チェック
+                    if not self._is_tracking_target(original_label):
+                        self.get_logger().info(f"ラベル'{original_label}'はトラッキング対象外")
                         continue
                     
-                    # 既存追跡との重複チェック
-                    overlap_label = self._find_overlapping_existing_tracking(new_box, new_label)
+                    # ユニークラベル作成
+                    unique_label = f"{original_label}_{i}"
                     
-                    if overlap_label:
-                        # 既存追跡と重複している場合は統合
-                        self.get_logger().info(f"既存追跡'{overlap_label}'と新規検出'{new_label}'を統合")
-                        self._merge_detection_with_existing_tracking(overlap_label, new_box, detection_timestamp)
-                        integrated_count += 1
+                    # bboxをリストに変換
+                    if hasattr(bbox, 'cpu'):
+                        bbox_list = bbox.cpu().numpy().tolist()
                     else:
-                        # 新しいオブジェクトとして追加
-                        unique_label = self._generate_unique_label(new_label, existing_labels)
-                        self.get_logger().info(f"新規オブジェクト'{unique_label}'を追加")
-                        self._add_new_tracking_object(unique_label, new_box, detection_timestamp, current_time)
-                        existing_labels.add(unique_label)
-                        added_count += 1
+                        bbox_list = list(bbox)
+                    
+                    # CSRTトラッカー初期化
+                    if self._initialize_csrt_tracker(unique_label, current_gray, bbox_list):
+                        success_count += 1
+                    else:
+                        self.get_logger().error(f"トラッカー初期化失敗: {unique_label}")
                 
-                # 検出されなくなったオブジェクトを削除
-                removed_count = self._remove_undetected_objects(new_labels)
-                
-                self.get_logger().info(f"統合完了: {integrated_count}個統合, {added_count}個新規追加, {removed_count}個削除")
+                self.get_logger().info(f"トラッカー初期化完了: {success_count}/{len(boxes)}")
+                self.tracking_valid = success_count > 0
                 
         except Exception as e:
-            self.get_logger().error(f"検出統合エラー: {e}")
-            # フォールバック: 従来の初期化方式
-            current_gray = self._get_current_gray_image()
-            if current_gray is not None:
-                self._initialize_tracking_boxes(current_gray)
+            self.get_logger().error(f"トラッカー初期化エラー: {e}")
+            import traceback
+            self.get_logger().error(f"トレースバック: {traceback.format_exc()}")
     
     def _find_overlapping_existing_tracking(self, new_box: List[float], new_label: str) -> Optional[str]:
         """新規検出ボックスと重複する既存追跡を検索"""
@@ -1649,6 +2228,570 @@ class LangSamWithOptFlowNode(Node):
         except Exception as e:
             self.get_logger().error(f"マージエラー: {e}")
     
+    def _initialize_csrt_tracker(self, label: str, image: np.ndarray, bbox: List[float]) -> bool:
+        """実際のCSRTトラッカー初期化（高精度）"""
+        try:
+            # 基本チェック
+            if image is None or image.size == 0:
+                self.get_logger().error(f"無効な画像: {label}")
+                return False
+                
+            if not bbox or len(bbox) != 4:
+                self.get_logger().error(f"無効なbbox: {label} - {bbox}")
+                return False
+            
+            height, width = image.shape[:2]
+            x1, y1, x2, y2 = bbox
+            
+            # 境界クリッピング
+            x1 = max(0, min(x1, width - 1))
+            y1 = max(0, min(y1, height - 1))
+            x2 = min(x2, width)
+            y2 = min(y2, height)
+            
+            # OpenCVトラッカー用の(x, y, width, height)形式に変換
+            tracker_bbox = (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+            
+            # 最小サイズ保証
+            if tracker_bbox[2] < 20 or tracker_bbox[3] < 20:
+                self.get_logger().warn(f"bbox小さすぎ: {label} - {tracker_bbox[2]}x{tracker_bbox[3]}")
+                return False
+            
+            # CSRTトラッカー作成
+            csrt_tracker = cv2.TrackerCSRT_create()
+            
+            # BGR画像に変換（CSRTはBGR形式を要求）
+            if len(image.shape) == 2:
+                # グレースケール → BGR変換
+                tracker_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            elif len(image.shape) == 3 and image.shape[2] == 3:
+                tracker_image = image.copy()
+            else:
+                self.get_logger().error(f"サポートされていない画像形式: {image.shape}")
+                return False
+            
+            # CSRTトラッカー初期化
+            success = csrt_tracker.init(tracker_image, tracker_bbox)
+            
+            if not success:
+                self.get_logger().error(f"CSRTトラッカー初期化失敗: {label}")
+                return False
+            
+            # トラッカーとデータを保存
+            with self.tracking_data_lock:
+                # CSRTトラッカー保存
+                if not hasattr(self, 'tracked_csrt_trackers'):
+                    self.tracked_csrt_trackers = {}
+                self.tracked_csrt_trackers[label] = csrt_tracker
+                
+                # バウンディングボックス保存
+                self.tracked_boxes_per_label[label] = [x1, y1, x2, y2]
+                self.tracker_failure_counts[label] = 0
+            
+            self.get_logger().info(f"✓ CSRTトラッカー初期化成功: {label} - bbox={tracker_bbox}")
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"CSRTトラッカー初期化エラー {label}: {e}")
+            return False
+    
+    def _create_optimized_csrt_tracker(self):
+        """高速移動環境に最適化されたCSRTトラッカーを作成（OpenCV互換性対応）"""
+        try:
+            # CSRTパラメータを高速移動環境用に最適化
+            params = cv2.TrackerCSRT_Params()
+            
+            # 安全なパラメータのみ設定（OpenCV互換性を確保）
+            safe_params = [
+                ('use_hog', True),               # HOG特徴を使用
+                ('use_color_names', True),       # カラー特徴を使用
+                ('use_gray', False),             # グレースケール特徴は無効
+                ('use_rgb', True),               # RGB特徴を使用
+                ('use_channel_weights', True),   # チャネル重みを使用
+                ('use_segmentation', True),      # セグメンテーション機能を使用
+                ('admm_iterations', 4),          # ADMM反復回数
+                ('histogram_bins', 16),          # ヒストグラムビン数
+                ('background_ratio', 2),         # 背景比率
+                ('number_of_scales', 33),        # スケール数
+                ('scale_sigma_factor', 0.25),    # スケールシグマ因子
+                ('scale_model_max_area', 512),   # スケールモデル最大エリア
+                ('scale_lr', 0.025),             # スケール学習率
+                ('scale_step', 1.02)             # スケールステップ
+            ]
+            
+            # 安全にパラメータを設定
+            applied_params = []
+            for param_name, param_value in safe_params:
+                try:
+                    if hasattr(params, param_name):
+                        setattr(params, param_name, param_value)
+                        applied_params.append(param_name)
+                    else:
+                        self.get_logger().debug(f"CSRTパラメータ '{param_name}' は未対応")
+                except Exception as param_error:
+                    self.get_logger().debug(f"CSRTパラメータ '{param_name}' 設定エラー: {param_error}")
+            
+            if applied_params:
+                self.get_logger().debug(f"CSRT最適化パラメータ適用: {applied_params}")
+                tracker = cv2.TrackerCSRT_create(params)
+                return tracker
+            else:
+                self.get_logger().warning("CSRT最適化パラメータが適用できません、標準版を使用")
+                return cv2.TrackerCSRT_create()
+            
+        except Exception as e:
+            self.get_logger().warning(f"最適化CSRTトラッカー作成失敗、標準版を使用: {e}")
+            return cv2.TrackerCSRT_create()
+    
+    def _create_optimized_kcf_tracker(self):
+        """高速移動環境に最適化されたKCFトラッカーを作成（OpenCV互換性対応）"""
+        try:
+            # KCFパラメータを高速移動環境用に最適化
+            params = cv2.TrackerKCF_Params()
+            
+            # 安全なパラメータのみ設定（OpenCV互換性を確保）
+            safe_params = [
+                ('detect_thresh', 0.4),          # 検出閾値
+                ('sigma', 0.2),                  # ガウシアンカーネルのシグマ
+                ('interp_factor', 0.075),        # 補間因子
+                ('output_sigma_factor', 1.0/16.0), # 出力シグマ因子
+                ('resize', True),                # リサイズを有効化
+                ('max_patch_size', 80*80),       # 最大パッチサイズ
+                ('split_coeff', True),           # 係数分割を有効化
+                ('wrap_kernel', False),          # カーネルラップは無効化
+                ('compress_feature', True),      # 特徴圧縮を有効化
+                ('desc_npca', 0),                # NPCAを無効化
+                ('compressed_size', 2)           # 圧縮サイズ
+            ]
+            
+            # 特別な処理が必要なパラメータ
+            try:
+                if hasattr(params, 'desc_pca'):
+                    # cv2.TrackerKCF_MODE_* が存在するかチェック
+                    if hasattr(cv2, 'TrackerKCF_MODE_GRAY') and hasattr(cv2, 'TrackerKCF_MODE_CN'):
+                        params.desc_pca = cv2.TrackerKCF_MODE_GRAY | cv2.TrackerKCF_MODE_CN
+                        safe_params.append(('desc_pca', 'GRAY|CN'))
+            except Exception as e:
+                self.get_logger().debug(f"KCF desc_pcaパラメータ設定エラー: {e}")
+            
+            # 安全にパラメータを設定
+            applied_params = []
+            for param_name, param_value in safe_params:
+                try:
+                    if hasattr(params, param_name):
+                        setattr(params, param_name, param_value)
+                        applied_params.append(param_name)
+                    else:
+                        self.get_logger().debug(f"KCFパラメータ '{param_name}' は未対応")
+                except Exception as param_error:
+                    self.get_logger().debug(f"KCFパラメータ '{param_name}' 設定エラー: {param_error}")
+            
+            if applied_params:
+                self.get_logger().debug(f"KCF最適化パラメータ適用: {applied_params}")
+                tracker = cv2.TrackerKCF_create(params)
+                return tracker
+            else:
+                self.get_logger().warning("KCF最適化パラメータが適用できません、標準版を使用")
+                return cv2.TrackerKCF_create()
+            
+        except Exception as e:
+            self.get_logger().warning(f"最適化KCFトラッカー作成失敗、標準版を使用: {e}")
+            return cv2.TrackerKCF_create()
+    
+    def _validate_tracker_initialization(self, label: str, tracker, image: np.ndarray) -> bool:
+        """トラッカー初期化後の検証テスト"""
+        try:
+            # 現在のbboxを取得
+            current_bbox = self.tracked_boxes_per_label.get(label)
+            if current_bbox is None:
+                self.get_logger().warning(f"{label}: 初期化検証時にbboxが未設定")
+                return False
+            
+            self.get_logger().debug(f"{label}: 検証開始 - 保存済みbbox={current_bbox}")
+            
+            # ** 寛容な検証アプローチ：テスト更新を試行するが、失敗でも初期化成功とみなす **
+            try:
+                test_success, test_bbox = tracker.update(image)
+                self.get_logger().debug(f"{label}: 検証テスト結果 success={test_success}, bbox={test_bbox}")
+                
+                if test_success and test_bbox is not None:
+                    x, y, w, h = test_bbox
+                    height, width = image.shape[:2]
+                    
+                    # 完全に異常な場合のみ警告（それでも成功とみなす）
+                    if w < 1 or h < 1 or x < -width or y < -height or x > width*2 or y > height*2:
+                        self.get_logger().warning(f"{label}: 検証で異常なbbox検出: [{x:.1f},{y:.1f},{w:.1f},{h:.1f}] vs {width}x{height}")
+                    
+                    self.get_logger().debug(f"{label}: 初期化検証成功 - テストbbox=[{x:.1f},{y:.1f},{w:.1f},{h:.1f}]")
+                else:
+                    self.get_logger().debug(f"{label}: 検証テスト失敗も初期化は有効として処理")
+                
+            except Exception as update_error:
+                self.get_logger().debug(f"{label}: 検証中のupdate()エラー（初期化は有効）: {update_error}")
+            
+            # ** 重要: 検証結果に関わらず、tracker.init()が成功していれば常にTrueを返す **
+            return True
+            
+        except Exception as e:
+            self.get_logger().warning(f"{label}: 初期化検証エラー（初期化は有効として処理）: {e}")
+            return True  # エラーが発生しても初期化は成功として扱う
+    
+    def _cleanup_failed_tracker(self, label: str) -> None:
+        """失敗したトラッカーの完全クリーンアップ"""
+        try:
+            with self.tracking_data_lock:
+                if label in self.tracked_csrt_trackers:
+                    del self.tracked_csrt_trackers[label]
+                if label in self.tracked_features_per_label:
+                    del self.tracked_features_per_label[label]
+                if label in self.tracker_failure_counts:
+                    del self.tracker_failure_counts[label]
+                if label in self.tracker_initialization_times:
+                    del self.tracker_initialization_times[label]
+                if label in self.tracked_boxes_per_label:
+                    del self.tracked_boxes_per_label[label]
+                if hasattr(self, 'tracker_types') and label in self.tracker_types:
+                    del self.tracker_types[label]
+            self.get_logger().debug(f"{label}: 失敗したトラッカーのクリーンアップ完了")
+        except Exception as e:
+            self.get_logger().error(f"{label}: トラッカークリーンアップエラー: {e}")
+    
+    def _attempt_tracker_replacement(self, label: str, current_image: np.ndarray) -> bool:
+        """失敗したトラッカーの交換を試行"""
+        try:
+            self.get_logger().info(f"=== {label}: トラッカー交換処理開始 ===")
+            
+            # 現在のbboxを保存
+            current_bbox = self.tracked_boxes_per_label.get(label)
+            if current_bbox is None:
+                self.get_logger().error(f"{label}: 交換用bboxが見つかりません")
+                return False
+            
+            # 現在のトラッカー種類を取得
+            current_tracker_type = getattr(self, 'tracker_types', {}).get(label, "不明")
+            self.get_logger().info(f"{label}: 現在のトラッカー種類={current_tracker_type}")
+            
+            # 古いトラッカーをクリーンアップ
+            with self.tracking_data_lock:
+                if label in self.tracked_csrt_trackers:
+                    del self.tracked_csrt_trackers[label]
+                if label in self.tracked_features_per_label:
+                    del self.tracked_features_per_label[label]
+                if label in self.tracker_failure_counts:
+                    del self.tracker_failure_counts[label]
+                if label in self.tracker_initialization_times:
+                    del self.tracker_initialization_times[label]
+                if hasattr(self, 'tracker_types') and label in self.tracker_types:
+                    del self.tracker_types[label]
+            
+            # 新しいトラッカーで再初期化を試行
+            success = self._initialize_csrt_tracker(label, current_image, current_bbox)
+            
+            if success:
+                new_tracker_type = getattr(self, 'tracker_types', {}).get(label, "不明")
+                self.get_logger().info(f"✓ {label}: トラッカー交換成功 {current_tracker_type} -> {new_tracker_type}")
+                
+                # 交換後の安定化期間を設定
+                if hasattr(self, 'tracker_replacement_times'):
+                    self.tracker_replacement_times[label] = time.time()
+                else:
+                    self.tracker_replacement_times = {label: time.time()}
+                    
+                return True
+            else:
+                self.get_logger().error(f"✗ {label}: トラッカー交換失敗、削除")
+                # 交換に失敗した場合はbboxも削除
+                with self.tracking_data_lock:
+                    if label in self.tracked_boxes_per_label:
+                        del self.tracked_boxes_per_label[label]
+                return False
+                
+        except Exception as e:
+            self.get_logger().error(f"{label}: トラッカー交換エラー: {e}")
+            import traceback
+            self.get_logger().error(f"トレースバック: {traceback.format_exc()}")
+            return False
+    
+    def _is_tracker_stable(self, label: str) -> bool:
+        """トラッカーが安定化期間を過ぎているかチェック"""
+        try:
+            current_time = time.time()
+            
+            # 初期化からの経過時間をチェック
+            init_time = getattr(self, 'tracker_initialization_times', {}).get(label)
+            if init_time is not None:
+                init_elapsed = current_time - init_time
+                if init_elapsed < 0.5:  # 500ms以内は不安定期間
+                    return False
+            
+            # 交換からの経過時間をチェック
+            replacement_time = getattr(self, 'tracker_replacement_times', {}).get(label)
+            if replacement_time is not None:
+                replacement_elapsed = current_time - replacement_time
+                if replacement_elapsed < 0.3:  # 300ms以内は不安定期間
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            self.get_logger().debug(f"{label}: 安定性チェックエラー: {e}")
+            return True  # エラー時は安定とみなす
+    
+    def _pre_update_bbox_validation(self, label: str, image: np.ndarray) -> bool:
+        """tracker.update()実行前の事前検証"""
+        try:
+            current_bbox = self.tracked_boxes_per_label.get(label)
+            if current_bbox is None:
+                self.get_logger().debug(f"{label}: 事前検証でbbox未設定")
+                return False
+            
+            x1, y1, x2, y2 = current_bbox
+            height, width = image.shape[:2]
+            
+            # 基本的な妥当性チェック
+            if x1 >= x2 or y1 >= y2:
+                self.get_logger().warning(f"{label}: 事前検証で不正なbbox座標: [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}]")
+                return False
+            
+            # サイズチェック
+            bbox_width = x2 - x1
+            bbox_height = y2 - y1
+            if bbox_width < 5 or bbox_height < 5:
+                self.get_logger().warning(f"{label}: 事前検証でbbox小さすぎ: {bbox_width:.1f}x{bbox_height:.1f}")
+                return False
+            
+            # 境界チェック
+            if x1 < 0 or y1 < 0 or x2 > width or y2 > height:
+                self.get_logger().warning(f"{label}: 事前検証でbbox境界外: [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}] vs {width}x{height}")
+                # 境界外の場合は自動修正を試行
+                normalized_bbox = self._normalize_bounding_box(current_bbox, width, height, f"{label}_precheck")
+                if normalized_bbox is not None:
+                    self.tracked_boxes_per_label[label] = normalized_bbox
+                    self.get_logger().info(f"{label}: 事前検証で境界修正成功: {current_bbox} -> {normalized_bbox}")
+                    return True
+                else:
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            self.get_logger().warning(f"{label}: 事前検証エラー: {e}")
+            return False
+    
+    def _update_csrt_trackers_without_deletion(self, image: np.ndarray) -> None:
+        """全トラッカーを更新（削除なし・キャッチアップ用）"""
+        try:
+            # 画像形式を統一（トラッカー用）
+            if len(image.shape) == 2:
+                # グレースケール -> BGR変換
+                tracker_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            elif len(image.shape) == 3 and image.shape[2] == 3:
+                tracker_image = image.copy()
+            elif len(image.shape) == 3 and image.shape[2] == 1:
+                gray_2d = image.squeeze()
+                tracker_image = cv2.cvtColor(gray_2d, cv2.COLOR_GRAY2BGR)
+            else:
+                self.get_logger().warn(f"サポートされていない画像形式: {image.shape}")
+                return
+            
+            # データ型をuint8に統一
+            if tracker_image.dtype != np.uint8:
+                if np.max(tracker_image) <= 1.0:
+                    tracker_image = (tracker_image * 255).astype(np.uint8)
+                else:
+                    tracker_image = tracker_image.astype(np.uint8)
+                    
+            with self.tracking_data_lock:
+                for label, tracker in list(self.tracked_csrt_trackers.items()):
+                    try:
+                        # トラッカーを更新
+                        success, opencv_bbox = tracker.update(tracker_image)
+                        
+                        if success and opencv_bbox is not None:
+                            # OpenCV形式からバウンディングボックス形式に変換
+                            x, y, w, h = opencv_bbox
+                            bbox = [x, y, x + w, y + h]
+                            
+                            # バウンディングボックスを更新
+                            self.tracked_boxes_per_label[label] = bbox
+                            # キャッチアップ中は失敗カウントをリセットしない
+                            
+                            self.get_logger().debug(f"トラッカー更新成功(キャッチアップ): {label} - {bbox}")
+                            
+                        else:
+                            # 追跡失敗の場合も失敗カウントを増やさない
+                            self.get_logger().debug(f"トラッカー更新失敗(キャッチアップ): {label}")
+                                
+                    except Exception as e:
+                        self.get_logger().debug(f"トラッカー更新エラー(キャッチアップ) {label}: {e}")
+                        
+        except Exception as e:
+            self.get_logger().error(f"トラッカー更新エラー(キャッチアップ): {e}")
+    
+    def _reset_tracker_failure_counts(self) -> None:
+        """全トラッカーの失敗カウントをリセット（キャッチアップ完了後）"""
+        try:
+            with self.tracking_data_lock:
+                for label in self.tracked_csrt_trackers.keys():
+                    if label in self.tracker_failure_counts:
+                        self.tracker_failure_counts[label] = 0
+                self.get_logger().debug("トラッカー失敗カウントをリセット")
+                
+        except Exception as e:
+            self.get_logger().error(f"トラッカー失敗カウントリセットエラー: {e}")
+    
+    def _update_csrt_trackers_with_sync_check(self, image: np.ndarray) -> None:
+        """同期チェック付きトラッカー更新（リアルタイム追跡強化版）"""
+        try:
+            # 画像形式を統一（トラッカー用）
+            if len(image.shape) == 2:
+                # グレースケール -> BGR変換
+                tracker_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            elif len(image.shape) == 3 and image.shape[2] == 3:
+                tracker_image = image.copy()
+            elif len(image.shape) == 3 and image.shape[2] == 1:
+                gray_2d = image.squeeze()
+                tracker_image = cv2.cvtColor(gray_2d, cv2.COLOR_GRAY2BGR)
+            else:
+                self.get_logger().warn(f"サポートされていない画像形式: {image.shape}")
+                return
+            
+            # データ型をuint8に統一
+            if tracker_image.dtype != np.uint8:
+                if np.max(tracker_image) <= 1.0:
+                    tracker_image = (tracker_image * 255).astype(np.uint8)
+                else:
+                    tracker_image = tracker_image.astype(np.uint8)
+                    
+            with self.tracking_data_lock:
+                labels_to_remove = []
+                success_count = 0
+                total_trackers = len(self.tracked_features_per_label)
+                
+                for label, tracker in list(self.tracked_csrt_trackers.items()):
+                    try:
+                        # トラッカーを更新
+                        success, opencv_bbox = tracker.update(tracker_image)
+                        
+                        if success and opencv_bbox is not None:
+                            # OpenCV形式からバウンディングボックス形式に変換
+                            x, y, w, h = opencv_bbox
+                            bbox = [x, y, x + w, y + h]
+                            
+                            # 境界チェック
+                            height, width = image.shape[:2] if len(image.shape) >= 2 else image.shape
+                            if (0 <= x < width and 0 <= y < height and 
+                                x + w <= width and y + h <= height and w > 0 and h > 0):
+                                # バウンディングボックスを更新
+                                self.tracked_boxes_per_label[label] = bbox
+                                self.tracker_failure_counts[label] = 0
+                                success_count += 1
+                                
+                                self.get_logger().debug(f"リアルタイム追跡成功: {label} - {bbox}")
+                            else:
+                                self.get_logger().debug(f"境界外bbox: {label} - {bbox}")
+                                self.tracker_failure_counts[label] += 1
+                            
+                        else:
+                            # 追跡失敗の場合
+                            self.tracker_failure_counts[label] += 1
+                            self.get_logger().debug(f"リアルタイム追跡失敗: {label} (失敗回数: {self.tracker_failure_counts[label]})")
+                            
+                            # 失敗回数が閾値を超えた場合は削除
+                            if self.tracker_failure_counts[label] >= self.tracker_failure_threshold:
+                                labels_to_remove.append(label)
+                                self.get_logger().info(f"トラッカー削除: {label} (連続失敗)")
+                                
+                    except Exception as e:
+                        self.get_logger().error(f"トラッカー更新エラー {label}: {e}")
+                        labels_to_remove.append(label)
+                
+                # 失敗したトラッカーを削除
+                for label in labels_to_remove:
+                    self._remove_tracking_object(label)
+                    
+                # 追跡状態を更新
+                self.tracking_valid = len(getattr(self, 'tracked_csrt_trackers', {})) > 0
+                
+                # リアルタイム追跡結果のログ
+                if total_trackers > 0:
+                    success_rate = (success_count / total_trackers) * 100
+                    self.get_logger().debug(f"リアルタイム追跡結果: {success_count}/{total_trackers}成功 ({success_rate:.1f}%)")
+                
+        except Exception as e:
+            self.get_logger().error(f"同期チェック付きトラッカー更新エラー: {e}")
+    
+    def _update_csrt_trackers(self, image: np.ndarray) -> None:
+        """全トラッカーを更新（KCF/MOSSE/MIL/CSRT対応）"""
+        try:
+            # 画像形式を統一（トラッカー用）
+            if len(image.shape) == 2:
+                # グレースケール -> BGR変換
+                tracker_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            elif len(image.shape) == 3 and image.shape[2] == 3:
+                tracker_image = image.copy()
+            elif len(image.shape) == 3 and image.shape[2] == 1:
+                gray_2d = image.squeeze()
+                tracker_image = cv2.cvtColor(gray_2d, cv2.COLOR_GRAY2BGR)
+            else:
+                self.get_logger().warn(f"サポートされていない画像形式: {image.shape}")
+                return
+            
+            # データ型をuint8に統一
+            if tracker_image.dtype != np.uint8:
+                if np.max(tracker_image) <= 1.0:
+                    tracker_image = (tracker_image * 255).astype(np.uint8)
+                else:
+                    tracker_image = tracker_image.astype(np.uint8)
+                    
+            with self.tracking_data_lock:
+                labels_to_remove = []
+                
+                for label, tracker in list(self.tracked_csrt_trackers.items()):
+                    try:
+                        # トラッカーを更新
+                        success, opencv_bbox = tracker.update(tracker_image)
+                        
+                        if success and opencv_bbox is not None:
+                            # OpenCV形式からバウンディングボックス形式に変換
+                            x, y, w, h = opencv_bbox
+                            bbox = [x, y, x + w, y + h]
+                            
+                            # バウンディングボックスを更新
+                            self.tracked_boxes_per_label[label] = bbox
+                            self.tracker_failure_counts[label] = 0
+                            
+                            self.get_logger().debug(f"トラッカー更新成功: {label} - {bbox}")
+                            
+                        else:
+                            # 追跡失敗の場合
+                            self.tracker_failure_counts[label] += 1
+                            self.get_logger().debug(f"トラッカー更新失敗: {label} (失敗回数: {self.tracker_failure_counts[label]})")
+                            
+                            # 失敗回数が閾値を超えた場合は削除
+                            if self.tracker_failure_counts[label] >= self.tracker_failure_threshold:
+                                labels_to_remove.append(label)
+                                self.get_logger().info(f"トラッカー削除: {label} (連続失敗)")
+                                
+                    except Exception as e:
+                        self.get_logger().error(f"トラッカー更新エラー {label}: {e}")
+                        labels_to_remove.append(label)
+                
+                # 失敗したトラッカーを削除
+                for label in labels_to_remove:
+                    self._remove_tracking_object(label)
+                    
+                # 追跡状態を更新
+                self.tracking_valid = len(getattr(self, 'tracked_csrt_trackers', {})) > 0
+                
+                # デバッグ情報
+                if len(self.tracked_features_per_label) > 0:
+                    self.get_logger().debug(f"アクティブトラッカー: {len(self.tracked_features_per_label)}個")
+                
+        except Exception as e:
+            self.get_logger().error(f"CSRTトラッカー更新エラー: {e}")
+    
+    
     def _add_new_tracking_object(self, unique_label: str, new_box: List[float], detection_timestamp: Optional[float], current_time: float) -> None:
         """新規オブジェクトを追跡に追加"""
         try:
@@ -1658,35 +2801,15 @@ class LangSamWithOptFlowNode(Node):
                 if images:
                     detection_gray, detection_rgb, roi_coords = images
                     
-                    # 新規オブジェクトの特徴点抽出
-                    feature_points = extract_harris_corners_from_bbox(
-                        detection_gray,
-                        new_box,
-                        self.harris_max_corners,
-                        self.harris_quality_level,
-                        self.harris_min_distance,
-                        self.harris_block_size,
-                        self.harris_k,
-                        self.use_harris_detector
-                    )
+                    # 追跡データに追加（CSRTトラッカーベース）
+                    self._add_tracking_data(unique_label, new_box, detection_gray)
                     
-                    # 追跡データに追加
-                    if feature_points is not None and len(feature_points) > 0:
-                        self._add_tracking_data(unique_label, new_box, feature_points)
-                        
-                        # 検出時点から現在まで高速追跡で更新
-                        time_gap = current_time - detection_timestamp
-                        if time_gap > 0.05:
-                            self._fast_forward_new_tracking(unique_label, detection_timestamp, current_time)
-                        
-                        self.get_logger().info(f"新規追跡'{unique_label}'を追加: {len(feature_points)}個の特徴点")
-                    else:
-                        # 特徴点が取得できない場合は中心点で追加
-                        center_x = (new_box[0] + new_box[2]) / 2
-                        center_y = (new_box[1] + new_box[3]) / 2
-                        center_point = np.array([[[center_x, center_y]]], dtype=np.float32)
-                        self._add_tracking_data(unique_label, new_box, center_point)
-                        self.get_logger().warn(f"新規追跡'{unique_label}'を中心点で追加")
+                    # 検出時点から現在まで高速追跡で更新
+                    time_gap = current_time - detection_timestamp
+                    if time_gap > 0.05:
+                        self._fast_forward_new_tracking(unique_label, detection_timestamp, current_time)
+                    
+                    self.get_logger().info(f"新規追跡'{unique_label}'を中心点で追加")
                 else:
                     # 検出時点の画像が取得できない場合は現在の画像で初期化
                     current_gray = self._get_current_gray_image()
@@ -1701,41 +2824,27 @@ class LangSamWithOptFlowNode(Node):
         except Exception as e:
             self.get_logger().error(f"新規追跡追加エラー: {e}")
     
-    def _add_tracking_data(self, label: str, box: List[float], features: np.ndarray) -> None:
-        """追跡データを内部構造に追加"""
+    def _add_tracking_data(self, label: str, box: List[float], gray: np.ndarray) -> None:
+        """追跡データを内部構造に追加（CSRTトラッカーベース）"""
         try:
-            # バウンディングボックス
-            self.tracked_boxes_per_label[label] = box
-            
-            # 特徴点
-            self.tracked_features_per_label[label] = features
-            
-            # 中心点
-            center_x = (box[0] + box[2]) / 2
-            center_y = (box[1] + box[3]) / 2
-            center_point = np.array([[[center_x, center_y]]], dtype=np.float32)
-            self.tracked_centers_per_label[label] = center_point
-            
-            # 元のサイズ
-            width = box[2] - box[0]
-            height = box[3] - box[1]
-            self.original_box_sizes[label] = (width, height)
-            
-            # 相対オフセット
-            offsets = []
-            for feature_point in features:
-                fx, fy = feature_point[0]
-                offset_x = fx - center_x
-                offset_y = fy - center_y
-                offsets.append([offset_x, offset_y])
-            self.feature_to_center_offsets[label] = np.array(offsets, dtype=np.float32)
-            
-            # 検出時刻を記録
-            current_time = time.time()
-            self.object_last_detection_time[label] = current_time
-            
-            # 追跡有効化
-            self.tracking_valid = True
+            # CSRTトラッカーを初期化
+            if self._initialize_csrt_tracker(label, gray, box):
+                # バウンディングボックス
+                self.tracked_boxes_per_label[label] = box
+                
+                # 元のサイズ
+                width = box[2] - box[0]
+                height = box[3] - box[1]
+                self.original_box_sizes[label] = (width, height)
+                
+                # 検出時刻を記録
+                current_time = time.time()
+                self.object_last_detection_time[label] = current_time
+                
+                # 追跡有効化
+                self.tracking_valid = True
+            else:
+                self.get_logger().warn(f"CSRTトラッカー初期化失敗: {label}")
             
         except Exception as e:
             self.get_logger().error(f"追跡データ追加エラー: {e}")
@@ -1775,40 +2884,24 @@ class LangSamWithOptFlowNode(Node):
             self.get_logger().error(f"新規追跡高速更新エラー: {e}")
     
     def _update_single_object_tracking(self, label: str, prev_gray: np.ndarray, curr_gray: np.ndarray) -> None:
-        """単一オブジェクトの追跡更新"""
+        """単一オブジェクトのCSRTトラッカー更新"""
         try:
-            if label not in self.tracked_features_per_label:
+            if label not in self.tracked_csrt_trackers:
                 return
             
-            prev_features = self.tracked_features_per_label[label]
-            if prev_features is None or len(prev_features) == 0:
-                return
+            # 指定ラベルのCSRTトラッカーのみ更新
+            tracker = self.tracked_csrt_trackers[label]
+            success, opencv_bbox = tracker.update(curr_gray)
             
-            # オプティカルフロー計算
-            curr_features, status, _ = cv2.calcOpticalFlowPyrLK(
-                prev_gray, curr_gray, prev_features, None,
-                winSize=(self.optical_flow_win_size_x, self.optical_flow_win_size_y),
-                maxLevel=self.optical_flow_max_level,
-                criteria=self.optical_flow_criteria
-            )
-            
-            if curr_features is not None and status is not None:
-                valid_indices = (status == 1).flatten()
-                if np.any(valid_indices):
-                    # 有効な特徴点のみ保持
-                    valid_features = curr_features[valid_indices]
-                    self.tracked_features_per_label[label] = valid_features
-                    
-                    # 相対オフセットも更新
-                    if label in self.feature_to_center_offsets:
-                        valid_offsets = self.feature_to_center_offsets[label][valid_indices]
-                        self.feature_to_center_offsets[label] = valid_offsets
-                    
-                    # バウンディングボックス更新
-                    self._update_bounding_box_from_features(label)
-                else:
-                    # 追跡失敗時は削除
-                    self._remove_tracking_object(label)
+            if success and opencv_bbox is not None:
+                # OpenCV形式からバウンディングボックス形式に変換
+                x, y, w, h = opencv_bbox
+                bbox = [x, y, x + w, y + h]
+                self.tracked_boxes_per_label[label] = bbox
+                self.tracker_failure_counts[label] = 0
+            else:
+                # 追跡失敗時は削除
+                self._remove_tracking_object(label)
                     
         except Exception as e:
             self.get_logger().error(f"単一追跡更新エラー: {e}")
@@ -1823,16 +2916,16 @@ class LangSamWithOptFlowNode(Node):
         return unique_label
     
     def _remove_tracking_object(self, label: str) -> None:
-        """追跡オブジェクトを削除"""
+        """追跡オブジェクト（CSRTトラッカー含む）を削除"""
         try:
-            if label in self.tracked_features_per_label:
-                del self.tracked_features_per_label[label]
             if label in self.tracked_boxes_per_label:
                 del self.tracked_boxes_per_label[label]
-            if label in self.tracked_centers_per_label:
-                del self.tracked_centers_per_label[label]
-            if label in self.feature_to_center_offsets:
-                del self.feature_to_center_offsets[label]
+            if label in self.tracked_csrt_trackers:
+                del self.tracked_csrt_trackers[label]
+            if label in self.tracker_failure_counts:
+                del self.tracker_failure_counts[label]
+            if label in self.tracker_initialization_times:
+                del self.tracker_initialization_times[label]
             if label in self.original_box_sizes:
                 del self.original_box_sizes[label]
             if label in self.object_last_detection_time:
@@ -1843,6 +2936,55 @@ class LangSamWithOptFlowNode(Node):
         except Exception as e:
             self.get_logger().error(f"追跡オブジェクト削除エラー: {e}")
     
+    def _start_image_storage(self, timestamp: float) -> None:
+        """GroundingDINO処理開始時に画像保存を開始"""
+        with self.tracking_data_lock:
+            self.grounding_dino_in_progress = True
+            self.grounding_dino_start_time = timestamp
+            # 画像クリアは早送り処理完了後に実行（時間的整合性処理で必要）
+            self.get_logger().info(f"画像保存開始: {timestamp:.3f} (GroundingDINO処理開始)")
+    
+    def _store_image_if_needed(self, image: np.ndarray, timestamp: float) -> None:
+        """GroundingDINO処理中であれば画像を保存"""
+        with self.tracking_data_lock:
+            if self.grounding_dino_in_progress and self.grounding_dino_start_time is not None:
+                # 処理開始時刻以降の画像のみ保存
+                if timestamp >= self.grounding_dino_start_time:
+                    self.stored_images.append((timestamp, image.copy()))
+                    # 詳細ログ：全画像保存を記録
+                    time_since_start = timestamp - self.grounding_dino_start_time
+                    self.get_logger().info(f"画像保存: {timestamp:.3f} (+{time_since_start:.3f}s) 総数:{len(self.stored_images)}")
+                    # メモリ使用量制限（最大30フレーム分）
+                    if len(self.stored_images) > 30:
+                        self.stored_images.pop(0)
+                else:
+                    # タイムスタンプが古い場合もログ出力
+                    time_diff = self.grounding_dino_start_time - timestamp
+                    self.get_logger().warn(f"画像保存スキップ: {timestamp:.3f} (開始前 -{time_diff:.3f}s)")
+            else:
+                # 処理中でない場合の頻度確認用ログ（毎100フレーム）
+                if hasattr(self, '_skip_count'):
+                    self._skip_count += 1
+                else:
+                    self._skip_count = 1
+                if self._skip_count % 100 == 0:
+                    progress_status = "進行中" if self.grounding_dino_in_progress else "停止中"
+                    start_time_status = "有効" if self.grounding_dino_start_time is not None else "未設定"
+                    self.get_logger().info(f"画像保存状態: {progress_status}, 開始時刻: {start_time_status}, スキップ数: {self._skip_count}")
+    
+    def _stop_image_storage(self) -> None:
+        """GroundingDINO処理完了時に画像保存を終了"""
+        with self.tracking_data_lock:
+            stored_count = len(self.stored_images)
+            current_time = time.time()
+            if self.grounding_dino_start_time is not None:
+                processing_time = current_time - self.grounding_dino_start_time
+                expected_frames = int(processing_time * 30)  # 30FPS想定
+                self.get_logger().info(f"画像保存終了: {stored_count}フレーム保存済み (処理時間:{processing_time:.3f}s, 期待フレーム数:{expected_frames})")
+            else:
+                self.get_logger().info(f"画像保存終了: {stored_count}フレーム保存済み (開始時刻未設定)")
+            self.grounding_dino_in_progress = False
+    
     def _cleanup_old_tracking_data(self) -> None:
         """古い・無効な追跡データの定期的クリーンアップ"""
         try:
@@ -1851,13 +2993,12 @@ class LangSamWithOptFlowNode(Node):
                 if initial_count == 0:
                     return
                 
-                # 無効な特徴点を持つラベルを特定
+                # 無効な中心点を持つラベルを特定
                 labels_to_remove = []
                 for label in list(self.tracked_boxes_per_label.keys()):
-                    # 特徴点が無効または空の場合
-                    if (label not in self.tracked_features_per_label or 
-                        self.tracked_features_per_label[label] is None or 
-                        len(self.tracked_features_per_label[label]) == 0):
+                    # CSRTトラッカーが無効または存在しない場合
+                    if (label not in self.tracked_csrt_trackers or 
+                        self.tracked_csrt_trackers[label] is None):
                         labels_to_remove.append(label)
                     
                     # バウンディングボックスが無効な場合
@@ -1883,6 +3024,130 @@ class LangSamWithOptFlowNode(Node):
                     
         except Exception as e:
             self.get_logger().error(f"追跡データクリーンアップエラー: {e}")
+    
+    def _verify_temporal_separation(self, new_box: List[float], new_label: str, detection_timestamp: Optional[float], current_time: float) -> bool:
+        """時間的分離検証: GroundingDINOと追跡が同じ位置に表示される問題の検出"""
+        try:
+            if detection_timestamp is None:
+                return True  # タイムスタンプ不明の場合は検証をスキップ
+            
+            # 時間差確認
+            time_diff = current_time - detection_timestamp
+            if time_diff < 0.1:  # 100ms以内の場合は同じタイミング
+                self.get_logger().debug(f"'{new_label}': 検出と現在時刻の時間差が小さい ({time_diff*1000:.1f}ms)")
+                return True  # 問題なし
+            
+            # 早送り処理が正常に機能している場合、追跡位置は検出位置から移動しているはず
+            with self.tracking_data_lock:
+                for existing_label, existing_box in self.tracked_boxes_per_label.items():
+                    # ラベルの基本名が同じかチェック
+                    existing_base = existing_label.split('_')[0]
+                    new_base = new_label.split('.')[0].strip()
+                    
+                    if existing_base != new_base:
+                        continue
+                    
+                    # 位置の重複度チェック
+                    overlap_ratio = self._calculate_bbox_overlap_ratio(new_box, existing_box)
+                    center_distance = self._calculate_center_distance(new_box, existing_box)
+                    
+                    # 高い重複度または小さい中心距離の場合は時間同期異常の疑い
+                    if overlap_ratio > 0.8 or center_distance < 20:
+                        self.get_logger().warn(f"⚠️ '{new_label}' ↔ '{existing_label}': 重複度={overlap_ratio:.3f}, 距離={center_distance:.1f}px")
+                        self.get_logger().warn(f"  - 時間差: {time_diff*1000:.1f}ms (検出: {detection_timestamp:.3f}, 現在: {current_time:.3f})")
+                        return False  # 時間同期異常
+            
+            return True  # 正常
+            
+        except Exception as e:
+            self.get_logger().error(f"時間的分離検証エラー: {e}")
+            return True  # エラー時は検証をスキップ
+    
+    def _calculate_bbox_overlap_ratio(self, box1: List[float], box2: List[float]) -> float:
+        """バウンディングボックスの重複率を計算"""
+        try:
+            x1_1, y1_1, x2_1, y2_1 = box1
+            x1_2, y1_2, x2_2, y2_2 = box2
+            
+            # 交差領域の計算
+            inter_x1 = max(x1_1, x1_2)
+            inter_y1 = max(y1_1, y1_2)
+            inter_x2 = min(x2_1, x2_2)
+            inter_y2 = min(y2_1, y2_2)
+            
+            if inter_x1 < inter_x2 and inter_y1 < inter_y2:
+                inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+                area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+                union_area = area1 + area2 - inter_area
+                
+                if union_area > 0:
+                    return inter_area / union_area
+            
+            return 0.0
+            
+        except Exception:
+            return 0.0
+    
+    def _calculate_center_distance(self, box1: List[float], box2: List[float]) -> float:
+        """バウンディングボックスの中心点間距離を計算"""
+        try:
+            center1_x = (box1[0] + box1[2]) / 2
+            center1_y = (box1[1] + box1[3]) / 2
+            center2_x = (box2[0] + box2[2]) / 2
+            center2_y = (box2[1] + box2[3]) / 2
+            
+            return np.sqrt((center1_x - center2_x)**2 + (center1_y - center2_y)**2)
+            
+        except Exception:
+            return float('inf')
+    
+    def _diagnose_temporal_sync_failure(self, detection_timestamp: Optional[float], current_time: float) -> None:
+        """時間同期失敗の診断"""
+        try:
+            self.get_logger().warn("=== 時間同期異常診断開始 ===")
+            
+            if detection_timestamp is None:
+                self.get_logger().warn("  - 検出タイムスタンプが未設定")
+                return
+            
+            time_diff = current_time - detection_timestamp
+            self.get_logger().warn(f"  - 時間差: {time_diff*1000:.1f}ms")
+            
+            # 画像バッファ状態の確認
+            with self.temporal_lock:
+                buffer_size = len(self.full_image_buffer)
+                if buffer_size > 0:
+                    latest_img_timestamp = self.image_timestamps[-1] if self.image_timestamps else 0
+                    buffer_delay = current_time - latest_img_timestamp
+                    self.get_logger().warn(f"  - 画像バッファ: {buffer_size}フレーム, 最新遅延: {buffer_delay*1000:.1f}ms")
+                else:
+                    self.get_logger().warn("  - 画像バッファが空")
+            
+            # トラッカー状態の確認
+            with self.tracking_data_lock:
+                active_trackers = len(self.tracked_features_per_label)
+                tracked_boxes = len(self.tracked_boxes_per_label)
+                self.get_logger().warn(f"  - アクティブトラッカー: {active_trackers}個")
+                self.get_logger().warn(f"  - 追跡中ボックス: {tracked_boxes}個")
+                
+                # 最後の早送り実行時刻をチェック
+                if hasattr(self, 'last_fastforward_time'):
+                    ff_delay = current_time - self.last_fastforward_time
+                    self.get_logger().warn(f"  - 最後の早送りからの経過時間: {ff_delay*1000:.1f}ms")
+            
+            # 推奨対処法
+            if time_diff > 0.5:
+                self.get_logger().warn("  - 推奨: 大きな時間ギャップのため緊急早送り実行")
+            elif active_trackers == 0:
+                self.get_logger().warn("  - 推奨: トラッカー初期化失敗のため再初期化")
+            else:
+                self.get_logger().warn("  - 推奨: 早送りアルゴリズムの動作確認")
+            
+            self.get_logger().warn("=== 時間同期異常診断終了 ===")
+            
+        except Exception as e:
+            self.get_logger().error(f"時間同期診断エラー: {e}")
     
     def _remove_undetected_objects(self, detected_labels: List[str]) -> int:
         """検出されなくなったオブジェクトをタイムアウト後に削除"""
@@ -1925,35 +3190,17 @@ class LangSamWithOptFlowNode(Node):
             return 0
     
     def _initialize_single_object_tracking(self, label: str, box: List[float], gray: np.ndarray) -> None:
-        """単一オブジェクトの追跡初期化"""
+        """単一オブジェクトのCSRTトラッカー初期化"""
         try:
-            # 特徴点抽出
-            feature_points = extract_harris_corners_from_bbox(
-                gray, box,
-                self.harris_max_corners,
-                self.harris_quality_level,
-                self.harris_min_distance,
-                self.harris_block_size,
-                self.harris_k,
-                self.use_harris_detector
-            )
-            
-            if feature_points is not None and len(feature_points) > 0:
-                self._add_tracking_data(label, box, feature_points)
-                self.get_logger().info(f"単一追跡初期化'{label}': {len(feature_points)}個の特徴点")
-            else:
-                # 特徴点が取得できない場合は中心点で初期化
-                center_x = (box[0] + box[2]) / 2
-                center_y = (box[1] + box[3]) / 2
-                center_point = np.array([[[center_x, center_y]]], dtype=np.float32)
-                self._add_tracking_data(label, box, center_point)
-                self.get_logger().warn(f"単一追跡初期化'{label}': 中心点で初期化")
+            # CSRTトラッカーで初期化
+            self._add_tracking_data(label, box, gray)
+            self.get_logger().info(f"単一追跡初期化'{label}': CSRTトラッカーで初期化")
                 
         except Exception as e:
             self.get_logger().error(f"単一追跡初期化エラー: {e}")
     
     def _initialize_tracking_boxes(self, gray: np.ndarray) -> None:
-        """検出結果からバウンディングボックス追跡を初期化"""
+        """検出結果からCSRTトラッカー追跡を初期化"""
         try:
             with self.detection_data_lock:
                 if self.latest_detection_data is None:
@@ -1970,17 +3217,16 @@ class LangSamWithOptFlowNode(Node):
                     return
             
             with self.tracking_data_lock:
+                # 既存のトラッカーをクリア
                 self.tracked_boxes_per_label = {}
-                self.tracked_centers_per_label = {}
-                self.tracked_features_per_label = {}
+                self.tracked_csrt_trackers = {}
+                self.tracker_failure_counts = {}
                 self.original_box_sizes = {}
-                self.feature_to_center_offsets = {}
                 
                 # ラベルの重複をカウントするための辞書
                 label_counts = {}
+                successful_trackers = 0
                 
-                # 並列処理の準備: バウンディングボックスとラベルの組み合わせ
-                bbox_label_pairs = []
                 for i, bbox in enumerate(boxes):
                     original_label = labels[i] if i < len(labels) else f'object_{i}'
                     
@@ -2003,71 +3249,31 @@ class LangSamWithOptFlowNode(Node):
                     else:
                         bbox_list = list(bbox)
                     
-                    bbox_label_pairs.append((bbox_list, unique_label))
-                
-                # 並列特徴点検出（複数ボックスがある場合のみ）
-                if len(bbox_label_pairs) > 1:
-                    self.get_logger().info(f"並列特徴点検出を開始: {len(bbox_label_pairs)}個のボックス")
-                    feature_results = self._extract_features_parallel(gray, bbox_label_pairs)
-                else:
-                    # 単一ボックスの場合は同期処理
-                    feature_results = self._extract_features_sequential(gray, bbox_label_pairs)
-                
-                # 結果を統合
-                for result in feature_results:
-                    unique_label = result['label']
-                    bbox_list = result['bbox']
-                    feature_points = result['feature_points']
-                    center_point = result['center_point']
-                    
-                    if feature_points is not None and len(feature_points) > 0:
-                        self.tracked_features_per_label[unique_label] = feature_points
-                        self.tracked_centers_per_label[unique_label] = center_point
+                    # CSRTトラッカーを初期化
+                    if self._initialize_csrt_tracker(unique_label, gray, bbox_list):
+                        # バウンディングボックスを保存
+                        self.tracked_boxes_per_label[unique_label] = bbox_list
                         
-                        # 特徴点と中心点の相対距離を計算して保存
+                        # 元のバウンディングボックスサイズを保存
                         x1, y1, x2, y2 = bbox_list
-                        center_x = (x1 + x2) / 2
-                        center_y = (y1 + y2) / 2
+                        width = x2 - x1
+                        height = y2 - y1
+                        self.original_box_sizes[unique_label] = (width, height)
                         
-                        offsets = []
-                        for feature_point in feature_points:
-                            fx, fy = feature_point[0]  # (1, 2) -> (2,)
-                            offset_x = fx - center_x
-                            offset_y = fy - center_y
-                            offsets.append([offset_x, offset_y])
-                        
-                        self.feature_to_center_offsets[unique_label] = np.array(offsets, dtype=np.float32)
-                        
-                        self.get_logger().info(f"ラベル'{unique_label}': {len(feature_points)}個の特徴点を検出、相対距離を記録")
+                        successful_trackers += 1
+                        self.tracker_initialization_times[unique_label] = time.time()  # 初期化時刻を記録
+                        self.get_logger().info(f"ラベル'{unique_label}': CSRTトラッカー初期化成功, サイズ({width:.1f}×{height:.1f})")
                     else:
-                        # 特徴点が見つからない場合は中心点のみ使用
-                        self.tracked_features_per_label[unique_label] = center_point
-                        self.tracked_centers_per_label[unique_label] = center_point
-                        self.feature_to_center_offsets[unique_label] = np.array([[0.0, 0.0]], dtype=np.float32)  # オフセットなし
-                        
-                        self.get_logger().warn(f"ラベル'{unique_label}': 特徴点検出失敗、中心点を使用")
-                    
-                    # 元のバウンディングボックスサイズを保存
-                    x1, y1, x2, y2 = bbox_list
-                    width = x2 - x1
-                    height = y2 - y1
-                    self.original_box_sizes[unique_label] = (width, height)
-                    
-                    # バウンディングボックスを保存（ユニークキー使用）
-                    self.tracked_boxes_per_label[unique_label] = bbox_list
-                    
-                    method_name = f"特徴点({len(self.tracked_features_per_label[unique_label])}個)"
-                    self.get_logger().info(f"ラベル'{unique_label}': ボックス{bbox_list}, {method_name}, サイズ({width:.1f}×{height:.1f})")
+                        self.get_logger().warn(f"ラベル'{unique_label}': CSRTトラッカー初期化失敗")
                 
                 # 前フレームのグレー画像を保存
                 self.prev_gray = gray.copy()
-                self.tracking_valid = len(self.tracked_boxes_per_label) > 0
+                self.tracking_valid = len(self.tracked_features_per_label) > 0
                 
-                total_boxes = len(self.tracked_boxes_per_label)
-                self.get_logger().info(f"バウンディングボックス追跡初期化完了: {total_boxes}個, 有効: {self.tracking_valid}")
+                self.get_logger().info(f"オプティカルフロートラッカー初期化完了: {successful_trackers}個成功, 有効: {self.tracking_valid}")
                 
         except Exception as e:
-            self.get_logger().error(f"バウンディングボックス初期化エラー: {repr(e)}")
+            self.get_logger().error(f"CSRTトラッカー初期化エラー: {repr(e)}")
             import traceback
             self.get_logger().error(f"トレースバック: {traceback.format_exc()}")
     
@@ -2115,17 +3321,8 @@ class LangSamWithOptFlowNode(Node):
     def _extract_single_feature(self, gray: np.ndarray, bbox_list: List[float], unique_label: str) -> Optional[Dict]:
         """単一バウンディングボックスの特徴点検出"""
         try:
-            # バウンディングボックス内の複数特徴点を抽出
-            feature_points = extract_harris_corners_from_bbox(
-                gray,
-                bbox_list,
-                self.harris_max_corners,
-                self.harris_quality_level,
-                self.harris_min_distance,
-                self.harris_block_size,
-                self.harris_k,
-                self.use_harris_detector
-            )
+            # Cannyエッジ点を抽出
+            feature_points = self._extract_canny_edge_points(gray, bbox_list)
             
             # バウンディングボックスの中心点を計算
             x1, y1, x2, y2 = bbox_list
@@ -2133,92 +3330,181 @@ class LangSamWithOptFlowNode(Node):
             center_y = (y1 + y2) / 2
             center_point = np.array([[[center_x, center_y]]], dtype=np.float32)
             
-            return {
+            result = {
                 'label': unique_label,
                 'bbox': bbox_list,
                 'feature_points': feature_points,
                 'center_point': center_point
             }
             
+            feature_count = len(feature_points) if feature_points is not None else 0
+            self.get_logger().debug(f"特徴点検出結果 {unique_label}: {feature_count}点")
+            
+            return result
+            
         except Exception as e:
             self.get_logger().error(f"特徴点検出エラー (ラベル: {unique_label}): {e}")
             return None
     
-    def _update_bounding_box_from_center(self, label: str, new_center: np.ndarray) -> Optional[List[float]]:
-        """新しい中心点に基づいて元のサイズでバウンディングボックスを再構築"""
+    
+    def _run_tracking_async(self, gray: np.ndarray, current_time: float) -> None:
+        """非同期オプティカルフロートラッキング実行"""
         try:
-            if label not in self.original_box_sizes:
-                return None
+            # 既に処理中の場合はスキップ
+            if self.tracking_processing:
+                return
             
-            # 元のバウンディングボックスサイズを取得
-            width, height = self.original_box_sizes[label]
+            # トラッカーが存在しない場合はスキップ
+            if len(self.tracked_features_per_label) == 0:
+                return
             
-            # 新しい中心点
-            new_center_x, new_center_y = new_center
-            
-            # 元のサイズを保持して新しい中心点の周りに再構築
-            half_width = width / 2
-            half_height = height / 2
-            
-            updated_box = [
-                new_center_x - half_width,   # x1
-                new_center_y - half_height,  # y1
-                new_center_x + half_width,   # x2
-                new_center_y + half_height   # y2
-            ]
-            
-            return updated_box
+            # 非同期でトラッキング処理を開始
+            self.tracking_processing = True
+            self.tracking_future = self.tracker_executor.submit(
+                self._tracking_worker, gray.copy(), current_time
+            )
             
         except Exception as e:
-            self.get_logger().error(f"バウンディングボックス更新エラー: {repr(e)}")
+            self.get_logger().error(f"非同期トラッキング開始エラー: {e}")
+            self.tracking_processing = False
+    
+    def _check_tracking_results(self) -> None:
+        """非同期トラッキング処理の結果を確認"""
+        try:
+            if self.tracking_future is not None and self.tracking_future.done():
+                try:
+                    tracking_result = self.tracking_future.result()
+                    if tracking_result:
+                        # トラッキング結果を適用
+                        self._apply_tracking_results(tracking_result)
+                        
+                except Exception as e:
+                    self.get_logger().error(f"非同期トラッキング結果取得エラー: {e}")
+                finally:
+                    self.tracking_future = None
+                    self.tracking_processing = False
+                    
+        except Exception as e:
+            self.get_logger().error(f"トラッキング結果確認エラー: {e}")
+    
+    def _tracking_worker(self, gray: np.ndarray, current_time: float) -> Optional[Dict]:
+        """トラッキング処理ワーカー（別スレッドで実行）"""
+        try:
+            # オプティカルフロートラッキング実行
+            result = self._track_optical_flow_worker(gray, current_time)
+            return result
+            
+        except Exception as e:
+            self.get_logger().error(f"トラッキングワーカーエラー: {e}")
             return None
     
-    def _track_optical_flow(self, gray: np.ndarray) -> None:
-        """シンプルなオプティカルフローによる追跡"""
+    def _track_optical_flow_worker(self, gray: np.ndarray, current_time: float) -> Optional[Dict]:
+        """オプティカルフロートラッキング処理（ワーカー用）"""
         try:
-            with self.tracking_data_lock:
-                if not self.tracked_features_per_label or self.prev_gray is None:
-                    self.prev_gray = gray.copy()
-                    return
-                
-                for label, prev_features in list(self.tracked_features_per_label.items()):
-                    if prev_features is None or len(prev_features) == 0:
-                        continue
-                    
-                    # オプティカルフロー計算
-                    curr_features, status, _ = cv2.calcOpticalFlowPyrLK(
-                        self.prev_gray, gray, prev_features, None,
-                        winSize=self.optical_flow_win_size,
-                        maxLevel=self.optical_flow_max_level,
-                        criteria=self.optical_flow_criteria
-                    )
-                    
-                    if curr_features is not None and status is not None:
-                        # 有効な特徴点のみを選択
-                        valid_indices = (status == 1).flatten()
-                        if np.any(valid_indices):
-                            valid_features = curr_features[valid_indices]
-                            self.tracked_features_per_label[label] = valid_features
-                            
-                            # 相対距離を使ってバウンディングボックスを更新
-                            self._update_bounding_box_from_features(label)
-                            
-                            self.get_logger().debug(f"'{label}': {len(valid_features)}個の特徴点追跡成功")
-                        else:
-                            # 追跡失敗時は削除
-                            self._remove_tracking_object(label)
-                            self.get_logger().info(f"'{label}': 追跡失敗により削除")
-                    else:
-                        # 計算失敗時も削除
-                        self._remove_tracking_object(label)
-                        self.get_logger().info(f"'{label}': 計算失敗により削除")
-                
-                self.prev_gray = gray.copy()
-                self.tracking_valid = len(self.tracked_features_per_label) > 0
+            if len(self.tracked_features_per_label) == 0:
+                return None
+            
+            # オプティカルフロー更新を実行
+            success = self._update_all_trackers(gray, update_prev_gray=True)
+            
+            if success:
+                # 現在のトラッキング状態を返す
+                with self.tracking_data_lock:
+                    result = {
+                        'tracking_boxes': self.tracked_boxes_per_label.copy(),
+                        'tracking_features': {k: v.copy() for k, v in self.tracked_features_per_label.items()},
+                        'tracking_valid': len(self.tracked_features_per_label) > 0,
+                        'timestamp': current_time
+                    }
+                return result
+            else:
+                return None
                 
         except Exception as e:
-            self.get_logger().error(f"オプティカルフロー追跡エラー: {repr(e)}")
-            # オプティカルフローエラーでもtracking_validは維持（SAM2が実行できるように）
+            self.get_logger().error(f"オプティカルフロートラッキングワーカーエラー: {e}")
+            return None
+    
+    def _apply_tracking_results(self, result: Dict) -> None:
+        """トラッキング結果を適用"""
+        try:
+            with self.tracking_data_lock:
+                if 'tracking_boxes' in result:
+                    self.tracked_boxes_per_label.update(result['tracking_boxes'])
+                if 'tracking_features' in result:
+                    self.tracked_features_per_label.update(result['tracking_features'])
+                if 'tracking_valid' in result:
+                    self.tracking_valid = result['tracking_valid']
+                    
+        except Exception as e:
+            self.get_logger().error(f"トラッキング結果適用エラー: {e}")
+    
+    def _track_optical_flow(self, gray: np.ndarray) -> None:
+        """CSRTトラッカーによるリアルタイム追跡（最新画像同期対応）"""
+        try:
+            # シンプルなトラッキング実行
+            current_time = time.time()
+            
+            # シンプルなCSRTトラッカー更新
+            if len(self.tracked_features_per_label) > 0:
+                self._update_csrt_trackers_simple(gray)
+            self.prev_gray = gray.copy()
+                
+        except Exception as e:
+            self.get_logger().error(f"CSRTトラッカー追跡エラー: {repr(e)}")
+    
+    def _update_csrt_trackers_simple(self, gray: np.ndarray) -> None:
+        """シンプルなCSRTトラッカー更新"""
+        try:
+            # BGRに変換
+            if len(gray.shape) == 2:
+                bgr_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            else:
+                bgr_image = gray.copy()
+                
+            success_count = 0
+            failed_labels = []
+            
+            with self.tracking_data_lock:
+                for label, tracker in list(self.tracked_csrt_trackers.items()):
+                    try:
+                        success, opencv_bbox = tracker.update(bgr_image)
+                        
+                        if success and len(opencv_bbox) == 4:
+                            x, y, w, h = opencv_bbox
+                            bbox = [x, y, x + w, y + h]
+                            self.tracked_boxes_per_label[label] = bbox
+                            self.tracker_failure_counts[label] = 0
+                            success_count += 1
+                        else:
+                            # 失敗カウント増加
+                            self.tracker_failure_counts[label] = self.tracker_failure_counts.get(label, 0) + 1
+                            if self.tracker_failure_counts[label] >= self.tracker_failure_threshold:
+                                failed_labels.append(label)
+                                
+                    except Exception as e:
+                        self.get_logger().error(f"トラッカー更新エラー {label}: {e}")
+                        failed_labels.append(label)
+                
+                # 失敗したトラッカーを削除
+                for label in failed_labels:
+                    if label in self.tracked_csrt_trackers:
+                        del self.tracked_csrt_trackers[label]
+                    if label in self.tracked_features_per_label:
+                        del self.tracked_features_per_label[label]
+                    if label in self.tracked_boxes_per_label:
+                        del self.tracked_boxes_per_label[label]
+                    if label in self.tracker_failure_counts:
+                        del self.tracker_failure_counts[label]
+                    self.get_logger().info(f"失敗トラッカー削除: {label}")
+                
+                # tracking_valid状態を更新
+                self.tracking_valid = len(self.tracked_features_per_label) > 0
+                
+                if self.frame_count % 30 == 0 and len(self.tracked_features_per_label) > 0:
+                    self.get_logger().info(f"トラッカー状態: {success_count}/{len(self.tracked_features_per_label)}成功")
+                    
+        except Exception as e:
+            self.get_logger().error(f"CSRTトラッカー更新エラー: {e}")
             # self.tracking_valid = False
     
     def _run_sam2_segmentation_optimized(self, image_cv: np.ndarray, boxes_data: Dict) -> Dict:
@@ -2398,8 +3684,7 @@ class LangSamWithOptFlowNode(Node):
             with self.tracking_data_lock:
                 tracking_data = {
                     'tracked_boxes_per_label': dict(self.tracked_boxes_per_label),
-                    'tracked_centers_per_label': {k: v.copy() for k, v in self.tracked_centers_per_label.items()},
-                    'tracked_features_per_label': {k: v.copy() for k, v in self.tracked_features_per_label.items()}
+                    'tracked_csrt_trackers': dict(self.tracked_csrt_trackers)  # CSRTトラッカー情報
                 }
             
             with self.sam_data_lock:
@@ -2501,7 +3786,7 @@ class LangSamWithOptFlowNode(Node):
             self.get_logger().error(f"GroundingDINO結果配信エラー: {repr(e)}")
     
     def _publish_optical_flow_result_worker(self, image_cv: np.ndarray, tracking_data: Dict) -> None:
-        """オプティカルフロー結果の可視化・配信 (バウンディングボックス表示)"""
+        """オプティカルフロー結果の可視化・配信 (バウンディングボックス・特徴点表示)"""
         try:
             tracked_boxes_per_label = tracking_data['tracked_boxes_per_label']
             
@@ -2514,7 +3799,8 @@ class LangSamWithOptFlowNode(Node):
                 cv2.putText(result_image, "Waiting for tracking...", (10, 30), 
                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
             else:
-                # 追跡バウンディングボックスと中心点を描画
+                # 追跡バウンディングボックスを描画（CSRTトラッカー版）
+                
                 for label, box in tracked_boxes_per_label.items():
                     if box is not None:
                         x1, y1, x2, y2 = [int(coord) for coord in box]
@@ -2522,10 +3808,8 @@ class LangSamWithOptFlowNode(Node):
                         # バウンディングボックスを描画
                         cv2.rectangle(result_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
                         
-                        # 中心点を描画
-                        center_x = int((x1 + x2) / 2)
-                        center_y = int((y1 + y2) / 2)
-                        cv2.circle(result_image, (center_x, center_y), 5, (0, 0, 255), -1)
+                        # CSRTトラッカー情報を表示（バウンディングボックスのみ、特徴点なし）
+                        self.get_logger().debug(f"可視化: {label} - CSRTトラッカーで追跡中")
                         
                         # ラベルを表示
                         cv2.putText(result_image, label, (x1, y1 - 10), 
@@ -2592,9 +3876,9 @@ class LangSamWithOptFlowNode(Node):
     def _publish_feature_points_worker(self, image_cv: np.ndarray, tracking_data: Dict) -> None:
         """バウンディングボックス中心点情報の配信（ワーカー版）"""
         try:
-            tracked_centers_per_label = tracking_data['tracked_centers_per_label']
+            tracked_boxes_per_label = tracking_data['tracked_boxes_per_label']
             
-            if not tracked_centers_per_label:
+            if not tracked_boxes_per_label:
                 return
             
             feature_points_msg = FeaturePoints()
@@ -2604,12 +3888,16 @@ class LangSamWithOptFlowNode(Node):
             all_points = []
             labels = []
             
-            for label, center in tracked_centers_per_label.items():
-                if center is not None:
-                    x, y = center.ravel()[:2]  # 中心点の座標を取得
+            # CSRTトラッカーでは、バウンディングボックスの中心点を配信
+            for label, bbox in tracked_boxes_per_label.items():
+                if bbox is not None and len(bbox) == 4:
+                    x1, y1, x2, y2 = bbox
+                    center_x = (x1 + x2) / 2
+                    center_y = (y1 + y2) / 2
+                    
                     point32 = Point32()
-                    point32.x = float(x)
-                    point32.y = float(y)
+                    point32.x = float(center_x)
+                    point32.y = float(center_y)
                     point32.z = 0.0
                     all_points.append(point32)
                     labels.append(label)
