@@ -1,24 +1,26 @@
 langsam_with_optflow_node:
   ros__parameters:
-    # 基本LangSAMパラメータ
+    # モデル設定
     sam_model: "sam2.1_hiera_small"
     text_prompt: "white line. red pylon. human. car."
     box_threshold: 0.3
     text_threshold: 0.2
     tracking_targets: ["white line", "red pylon", "human", "car"]
     
-    # パイプライン実行間隔
-    pipeline_interval: 90  # フレーム数（3秒 @ 30fps）
+    # 実行設定
+    pipeline_interval: 90        # 完全パイプライン実行間隔（フレーム）
+    enable_tracking: true        # CSRTトラッキング有効化
+    enable_sam: true            # SAM2セグメンテーション有効化
     
-    # CSRTトラッカー設定
-    min_bbox_size: 20     # 最小bbox幅・高さ
-    max_bbox_ratio: 0.8   # 画面サイズに対する最大bbox比率
+    # トピック設定
+    input_topic: "/zed/zed_node/rgb/image_rect_color"
+    gdino_topic: "/image_gdino"
+    csrt_topic: "/image_csrt"
+    sam_topic: "/image_sam"
     
     # CUDA設定
     cuda_arch_list: "6.0;6.1;7.0;7.5;8.0;8.6"
     enable_torch_no_grad: true
-    enable_gpu_memory_cleanup: true
     
-    # ログ設定
-    enable_fps_logging: true
-    enable_debug_logging: false
+    # ログ・デバッグ設定
+    enable_debug: false
