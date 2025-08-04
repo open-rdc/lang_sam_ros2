@@ -1,56 +1,24 @@
 langsam_with_optflow_node:
   ros__parameters:
     # 基本LangSAMパラメータ
-    sam_model: "sam2.1_hiera_small" 
-    text_prompt: "white line. red pylon. human. wall. car. building. mobility. road."
+    sam_model: "sam2.1_hiera_small"
+    text_prompt: "white line. red pylon. human. car."
     box_threshold: 0.3
     text_threshold: 0.2
-    tracking_targets: "white line. red pylon. human. car."
+    tracking_targets: ["white line", "red pylon", "human", "car"]
     
-    # 実行間隔パラメータ（最適化版）
-    grounding_dino_interval: 0.1  # GroundingDINO実行間隔（秒）
-    sam2_interval: 0.1  # SAM2実行間隔（秒）
-    enable_sam2_every_frame: true  # SAM2毎フレーム実行
+    # パイプライン実行間隔
+    pipeline_interval: 90  # フレーム数（3秒 @ 30fps）
     
-    # 非同期処理設定
-    enable_async_grounding_dino: true  # GroundingDINOの非同期処理を有効化
-    enable_async_sam2: true  # SAM2の非同期処理を有効化
-    enable_parallel_tracker_processing: true  # トラッカー処理の並列化を有効化
-    tracker_processing_workers: 4  # トラッカー処理の並列ワーカー数
+    # CSRTトラッカー設定
+    min_bbox_size: 20     # 最小bbox幅・高さ
+    max_bbox_ratio: 0.8   # 画面サイズに対する最大bbox比率
     
-    # 時間整合性設定（シンプル化）
-    enable_temporal_alignment: true  # 時間整合性を有効化
-    image_buffer_size: 30  # 画像バッファサイズ（フレーム数）
-    # 保存画像システム設定
-    stored_images_max: 30  # 保存画像の最大数
-    
-    # 追跡統合設定
-    enable_tracking_integration: true  # 既存追跡と新規検出の統合を有効化
-    overlap_iou_threshold: 0.3  # 重複判定のIoU閾値
-    overlap_distance_threshold: 100.0  # 重複判定の距離閾値（ピクセル）
-    merge_weight_existing: 0.7  # マージ時の既存追跡の重み
-    merge_weight_new: 0.3  # マージ時の新規検出の重み
-    detection_timeout: 2.0  # 検出されないオブジェクトの削除タイムアウト（秒）
-    
-    # CSRTトラッカーパラメータ（シンプル化）
-    csrt_tracker_type: "CSRT"  # トラッカータイプ（CSRT固定）
-    min_tracker_confidence: 0.2  # 最小トラッカー信頼度
-    tracker_failure_threshold: 20  # 連続失敗回数の閾値
-    
-    # 追跡検証パラメータ（簡素化）
-    max_displacement: 50.0  # 最大変位閾値（ピクセル）
-    
-    # CUDA設定パラメータ
+    # CUDA設定
     cuda_arch_list: "6.0;6.1;7.0;7.5;8.0;8.6"
-    force_cpu_mode: false
-    
-    # パフォーマンス設定
     enable_torch_no_grad: true
-    enable_memory_optimization: true
     enable_gpu_memory_cleanup: true
     
-    # ログ設定（シンプル化）
-    enable_parameter_logging: true
+    # ログ設定
     enable_fps_logging: true
-    log_level_override: ""  
-
+    enable_debug_logging: false
