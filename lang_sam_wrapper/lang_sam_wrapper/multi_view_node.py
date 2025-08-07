@@ -12,12 +12,12 @@ from collections import deque
 
 
 class MultiViewNode(Node):
-    """複数カメラ画像を統合表示するノード"""
+    """4分割画像表示（Original、GroundingDINO、CSRT、SAM2）+ 周波数監視"""
     
     def __init__(self):
         super().__init__('multi_view_node')
         
-        # 基本設定
+        # CvBridge（ROS Image ↔ OpenCV numpy変換）
         self.bridge = CvBridge()
         self.lock = threading.Lock()
         
@@ -25,28 +25,28 @@ class MultiViewNode(Node):
         self._declare_all_parameters()
         self._load_all_parameters()
         
-        # 画像バッファ
+        # 4分割画像バッファ（BGR形式）
         self.images = {
-            'original': None,      # 左上
-            'gdino': None,         # 右上
-            'csrt': None,          # 左下
-            'sam': None,           # 右下
+            'original': None,      # 左上：ZED生画像
+            'gdino': None,         # 右上：GroundingDINO検出結果
+            'csrt': None,          # 左下：CSRT追跡結果
+            'sam': None,           # 右下：SAM2セグメンテーション結果
         }
         
-        # 周波数計算用タイムスタンプバッファ（5秒間の履歴）
+        # 周波数計算用タイムスタンプバッファ（5秒履歴、最大300フレーム@60Hz）
         self.timestamp_buffers = {
-            'original': deque(maxlen=300),  # 最大5秒×60Hz
+            'original': deque(maxlen=300),
             'gdino': deque(maxlen=300),
             'csrt': deque(maxlen=300),
             'sam': deque(maxlen=300),
         }
         
-        # 現在の周波数
+        # リアルタイム周波数（Hz）
         self.frequencies = {
-            'original': 0.0,
-            'gdino': 0.0,
-            'csrt': 0.0,
-            'sam': 0.0,
+            'original': 0.0,  # ZED画像更新頻度
+            'gdino': 0.0,     # GroundingDINO実行頻度
+            'csrt': 0.0,      # CSRTトラッキング更新頻度
+            'sam': 0.0,       # SAM2セグメンテーション更新頻度
         }
         
         # サブスクライバー
@@ -66,10 +66,10 @@ class MultiViewNode(Node):
         # パブリッシャー
         self.multi_view_pub = self.create_publisher(Image, '/multi_view', 10)
         
-        # 定期配信タイマー
+        # 定期配信タイマー（指定FPSで統合画像配信）
         self.timer = self.create_timer(1.0 / self.output_fps, self.publish_multi_view)
         
-        self.get_logger().info("MultiViewNode開始")
+        self.get_logger().info("MultiViewNode初期化完了（4分割+周波数監視）")
     
     def _declare_all_parameters(self):
         """全パラメータ宣言"""
@@ -118,57 +118,58 @@ class MultiViewNode(Node):
         self.single_height = (self.output_height - 3 * self.border_width) // 2
     
     def original_callback(self, msg: Image):
-        """Original image callback with frequency tracking"""
+        """ZED生画像コールバック（周波数追跡付き）"""
         with self.lock:
             self.images['original'] = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             self._update_frequency('original')
     
     def gdino_callback(self, msg: Image):
-        """GroundingDINO result callback with frequency tracking"""
+        """GroundingDINO検出結果コールバック（周波数追跡付き）"""
         with self.lock:
             self.images['gdino'] = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             self._update_frequency('gdino')
     
     def csrt_callback(self, msg: Image):
-        """CSRT tracking result callback with frequency tracking"""
+        """CSRT追跡結果コールバック（周波数追跡付き）"""
         with self.lock:
             self.images['csrt'] = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             self._update_frequency('csrt')
     
     def sam_callback(self, msg: Image):
-        """SAM2 segmentation result callback with frequency tracking"""
+        """SAM2セグメンテーション結果コールバック（周波数追跡付き）"""
         with self.lock:
             self.images['sam'] = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             self._update_frequency('sam')
     
     def _update_frequency(self, topic_name: str):
-        """Update frequency calculation for specific topic"""
+        """指定トピック周波数計算（移動平均）"""
         current_time = time.time()
         self.timestamp_buffers[topic_name].append(current_time)
         
-        # Calculate frequency based on timestamps in buffer
+        # タイムスタンプバッファから周波数計算
         if len(self.timestamp_buffers[topic_name]) >= 2:
             time_span = current_time - self.timestamp_buffers[topic_name][0]
             if time_span > 0:
                 self.frequencies[topic_name] = (len(self.timestamp_buffers[topic_name]) - 1) / time_span
     
     def resize_image(self, image: np.ndarray) -> np.ndarray:
-        """画像を指定サイズにリサイズ"""
+        """画像リサイズ（4分割用、バイリニア補間）"""
         if image is None:
-            # 黒画像生成
+            # 黒画像生成（画像なしの場合）
             return np.zeros((self.single_height, self.single_width, 3), dtype=np.uint8)
         
         return cv2.resize(image, (self.single_width, self.single_height))
     
     def add_label(self, image: np.ndarray, text: str, position: str) -> np.ndarray:
-        """画像にラベルを追加"""
+        """OpenCVテキスト描画（周波数情報付きラベル）"""
         if not self.enable_labels:
             return image
         
-        # テキスト位置計算
+        # FONT_HERSHEY_SIMPLEXでテキストサイズ計算
         text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 
                                    self.label_font_scale, self.label_thickness)[0]
         
+        # 位置別座標計算
         if position == 'top_left':
             x, y = 10, 30
         elif position == 'top_right':
@@ -178,16 +179,16 @@ class MultiViewNode(Node):
         else:  # bottom_right
             x, y = self.single_width - text_size[0] - 10, self.single_height - 10
         
-        # テキスト描画
+        # OpenCVテキスト描画（BGR色空間）
         cv2.putText(image, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 
                    self.label_font_scale, self.label_color, self.label_thickness)
         
         return image
     
     def create_multi_view(self) -> np.ndarray:
-        """4分割画像作成"""
+        """4分割統合画像作成（2x2グリッドレイアウト）"""
         with self.lock:
-            # 各画像をリサイズ
+            # 各画像を統一サイズにリサイズ
             original = self.resize_image(self.images['original'])
             gdino = self.resize_image(self.images['gdino'])
             csrt = self.resize_image(self.images['csrt'])
@@ -199,11 +200,11 @@ class MultiViewNode(Node):
         csrt = self.add_label(csrt, f"CSRT ({self.frequencies['csrt']:.1f}Hz)", 'bottom_left')
         sam = self.add_label(sam, f"SAM ({self.frequencies['sam']:.1f}Hz)", 'bottom_right')
         
-        # 統合画像作成
+        # BGR統合画像キャンバス作成（境界線付き）
         multi_view = np.full((self.output_height, self.output_width, 3), 
                            self.border_color, dtype=np.uint8)
         
-        # 配置座標計算
+        # 2x2グリッド配置座標
         positions = {
             'original': (self.border_width, self.border_width),  # 左上
             'gdino': (self.border_width + self.single_width + self.border_width, self.border_width),  # 右上
@@ -212,7 +213,7 @@ class MultiViewNode(Node):
                    self.border_width + self.single_height + self.border_width),  # 右下
         }
         
-        # 各画像を配置
+        # NumPy配列スライシングで画像配置
         for image_name, image in [('original', original), ('gdino', gdino), 
                                 ('csrt', csrt), ('sam', sam)]:
             x, y = positions[image_name]
@@ -221,7 +222,7 @@ class MultiViewNode(Node):
         return multi_view
     
     def publish_multi_view(self):
-        """統合画像配信"""
+        """4分割統合画像配信（ROS Image message）"""
         try:
             multi_view = self.create_multi_view()
             msg = self.bridge.cv2_to_imgmsg(multi_view, 'bgr8')
@@ -230,7 +231,7 @@ class MultiViewNode(Node):
             self.multi_view_pub.publish(msg)
             
         except Exception as e:
-            self.get_logger().error(f"MultiView配信失敗: {e}")
+            self.get_logger().error(f"MultiView配信エラー: {e}")
 
 
 def main(args=None):

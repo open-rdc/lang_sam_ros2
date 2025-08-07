@@ -120,7 +120,6 @@ class LangSAMTracker:
             self.tracked_boxes = {}
             
             height, width = image_np.shape[:2]
-            successful_inits = 0
             
             for i, (box, label) in enumerate(zip(boxes, labels)):
                 # トラッキング対象チェック
@@ -153,7 +152,7 @@ class LangSAMTracker:
                 if bbox_width < min_size or bbox_height < min_size:
                     continue
                 
-                # CSRTトラッカー初期化
+                # CSRTトラッカー初期化（OpenCV 4.11.0対応）
                 try:
                     if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
                         tracker = cv2.legacy.TrackerCSRT_create()
@@ -171,7 +170,6 @@ class LangSAMTracker:
                         tracker_label = f"{label}_{i}"
                         self.trackers[tracker_label] = tracker
                         self.tracked_boxes[tracker_label] = [x1, y1, x2, y2]
-                        successful_inits += 1
                 except Exception:
                     pass
                     
@@ -227,7 +225,7 @@ class LangSAMTracker:
             self.tracked_boxes.pop(label, None)
     
     def update_trackers_only(self, image_np: np.ndarray) -> dict:
-        """CSRT tracking only (fast)"""
+        """CSRT tracking only（高速）"""
         self._update_existing_trackers(image_np)
         
         if not self.tracked_boxes:
@@ -252,13 +250,13 @@ class LangSAMTracker:
         self.tracking_targets = targets
     
     def clear_trackers(self):
-        """全トラッカークリア（安全な操作）"""
+        """全トラッカークリア"""
         self.trackers = {}
         self.tracked_boxes = {}
     
     def update_trackers_with_sam(self, image_np: np.ndarray) -> dict:
-        """最適化されたCSRT + SAM2（毎フレーム実行）"""
-        # Update CSRT trackers
+        """CSRT + SAM2最適化実行（毎フレーム）"""
+        # CSRTトラッカー更新
         self._update_existing_trackers(image_np)
         
         if not self.tracked_boxes:
@@ -273,7 +271,7 @@ class LangSAMTracker:
         tracked_boxes = list(self.tracked_boxes.values())
         tracked_labels = list(self.tracked_boxes.keys())
         
-        # Skip SAM2 if no tracked boxes
+        # SAM2処理をスキップ（追跡BOXなしの場合）
         if len(tracked_boxes) == 0:
             return {
                 "boxes": np.array([]),
@@ -284,7 +282,7 @@ class LangSAMTracker:
             }
         
         try:
-            # Fast SAM2 prediction on valid boxes
+            # 高速SAM2予測（有効なBOXに対して）
             masks, mask_scores, _ = self.sam.predict_batch(
                 [image_np], 
                 xyxy=[np.array(tracked_boxes)]
@@ -328,5 +326,5 @@ class LangSAMTracker:
                 "labels": tracked_labels,
                 "scores": np.ones(len(tracked_boxes)),
                 "masks": [],
-                "mask_scores": np.ones(len(tracked_boxes))  # デフォルトスコア
+                "mask_scores": np.ones(len(tracked_boxes))
             }

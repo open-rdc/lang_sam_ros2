@@ -1,40 +1,40 @@
 lang_sam_tracker_node:
   ros__parameters:
-    # モデル設定
-    sam_model: "sam2.1_hiera_small"
-    text_prompt: "white line. red pylon. human. car."
-    box_threshold: 0.3
-    text_threshold: 0.2
-    tracking_targets: ["white line", "red pylon", "human", "car"]
+    # ===== AIモデル設定 =====
+    sam_model: "sam2.1_hiera_small"  # SAM2モデル（small/base/large）
+    text_prompt: "white line. red pylon. human. car."  # GroundingDINO検出プロンプト
+    box_threshold: 0.3  # GroundingDINO BoundingBox信頼度閾値
+    text_threshold: 0.2  # GroundingDINO テキスト類似度閾値
+    tracking_targets: ["white line", "red pylon", "human", "car"]  # CSRT追跡対象
     
-    # 実行設定
-    gdino_interval_seconds: 1.0  # GroundingDINO実行間隔（秒）
-    enable_tracking: true        # CSRTトラッキング有効化
-    enable_sam: true            # SAM2セグメンテーション有効化
+    # ===== 実行周波数設定 =====
+    gdino_interval_seconds: 1.0  # GroundingDINO実行間隔（1.0秒 = 1Hz）
+    enable_tracking: true        # CSRTトラッキング有効化（毎フレーム）
+    enable_sam: true            # SAM2セグメンテーション有効化（毎フレーム）
     
-    # トピック設定
-    input_topic: "/zed/zed_node/rgb/image_rect_color"
-    gdino_topic: "/image_gdino"
-    csrt_topic: "/image_csrt"
-    sam_topic: "/image_sam"
+    # ===== ROS2トピック設定 =====
+    input_topic: "/zed/zed_node/rgb/image_rect_color"  # 入力画像（ZEDカメラ）
+    gdino_topic: "/image_gdino"    # GroundingDINO検出結果配信
+    csrt_topic: "/image_csrt"      # CSRT追跡結果配信
+    sam_topic: "/image_sam"        # SAM2セグメンテーション結果配信
 
 multi_view_node:
   ros__parameters:
-    # 入力トピック設定
-    original_topic: "/zed/zed_node/rgb/image_rect_color"
-    gdino_topic: "/image_gdino"
-    csrt_topic: "/image_csrt"
-    sam_topic: "/image_sam"
+    # ===== 入力トピック設定 =====
+    original_topic: "/zed/zed_node/rgb/image_rect_color"  # ZED生画像
+    gdino_topic: "/image_gdino"    # GroundingDINO検出結果画像
+    csrt_topic: "/image_csrt"      # CSRT追跡結果画像
+    sam_topic: "/image_sam"        # SAM2セグメンテーション結果画像
     
-    # 出力設定
-    output_fps: 30.0
-    output_width: 1280
-    output_height: 720
-    border_width: 2
-    border_color: [255, 255, 255]  # BGR白
+    # ===== 4分割画像出力設定 =====
+    output_fps: 30.0               # 統合画像配信周波数（Hz）
+    output_width: 1280             # 統合画像幅（ピクセル）
+    output_height: 720             # 統合画像高さ（ピクセル）
+    border_width: 2                # 分割境界線幅（ピクセル）
+    border_color: [255, 255, 255]  # 境界線色（BGR: 白）
     
-    # ラベル設定
-    enable_labels: true
-    label_font_scale: 0.7
-    label_thickness: 2
-    label_color: [0, 0, 255]  # BGR緑
+    # ===== 周波数表示ラベル設定 =====
+    enable_labels: true            # ラベル表示有効化
+    label_font_scale: 0.7          # OpenCVフォントスケール
+    label_thickness: 2             # テキスト線太さ
+    label_color: [0, 255, 0]       # ラベル色（BGR: 緑）
