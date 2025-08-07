@@ -121,10 +121,11 @@ class LangSAMTracker:
             print(f"検出ラベル: {labels}")
             print(f"トラッキング対象: {self.tracking_targets}")
             
-            # 既存トラッカークリア
+            # 既存トラッカークリア（安全な操作）
             old_count = len(self.trackers)
-            self.trackers.clear()
-            self.tracked_boxes.clear()
+            # 辞書を安全にクリア（空の辞書に置き換え）
+            self.trackers = {}
+            self.tracked_boxes = {}
             print(f"既存トラッカー{old_count}個をクリア")
             
             height, width = image_np.shape[:2]
@@ -217,7 +218,7 @@ class LangSAMTracker:
             traceback.print_exc()
     
     def _update_existing_trackers(self, image_np: np.ndarray):
-        """最適化されたCSRTトラッカー更新"""
+        """最適化されたCSRTトラッカー更新（安全な辞書操作）"""
         if not self.trackers:
             print("CSRTアップデート: トラッカーなし")
             return
@@ -230,7 +231,14 @@ class LangSAMTracker:
         # BGR画像使用（一貫性保持）
         bgr_image = image_np if len(image_np.shape) == 3 else cv2.cvtColor(image_np, cv2.COLOR_GRAY2BGR)
         
-        for label, tracker in self.trackers.items():
+        # 安全な反復処理のため辞書のコピーを作成
+        tracker_items = list(self.trackers.items())
+        
+        for label, tracker in tracker_items:
+            # トラッカーが削除済みかチェック
+            if label not in self.trackers:
+                continue
+                
             try:
                 success, bbox = tracker.update(bgr_image)
                 
@@ -255,16 +263,14 @@ class LangSAMTracker:
                 print(f"FAIL: '{label}' 例外発生 {e}")
                 labels_to_remove.append(label)
         
-        # 失敗したトラッカー削除
+        # 失敗したトラッカー削除（安全に実行）
         if labels_to_remove:
             print(f"削除: {labels_to_remove}")
-        for label in labels_to_remove:
-            if label in self.trackers:
-                del self.trackers[label]
-            if label in self.tracked_boxes:
-                del self.tracked_boxes[label]
+            for label in labels_to_remove:
+                self.trackers.pop(label, None)
+                self.tracked_boxes.pop(label, None)
         
-        print(f"CSRTアップデート完了: {successful_updates}/{len(self.trackers) + len(labels_to_remove)}個成功")
+        print(f"CSRTアップデート完了: {successful_updates}/{len(tracker_items)}個成功")
     
     def update_trackers_only(self, image_np: np.ndarray) -> dict:
         """CSRT tracking only (fast)"""
@@ -292,12 +298,12 @@ class LangSAMTracker:
         self.tracking_targets = targets
     
     def clear_trackers(self):
-        """全トラッカークリア"""
-        self.trackers.clear()
-        self.tracked_boxes.clear()
+        """全トラッカークリア（安全な操作）"""
+        self.trackers = {}
+        self.tracked_boxes = {}
     
     def update_trackers_with_sam(self, image_np: np.ndarray) -> dict:
-        """Optimized CSRT + SAM2 (every frame)"""
+        """最適化されたCSRT + SAM2（毎フレーム実行）"""
         # Update CSRT trackers
         self._update_existing_trackers(image_np)
         
@@ -330,19 +336,44 @@ class LangSAMTracker:
                 xyxy=[np.array(tracked_boxes)]
             )
             
+            # SAM2結果の安全な処理
+            result_masks = []
+            result_mask_scores = []
+            
+            # masksの安全な処理
+            try:
+                if masks is not None and isinstance(masks, (list, tuple)) and len(masks) > 0:
+                    if isinstance(masks[0], (list, tuple, np.ndarray)) and hasattr(masks[0], '__len__') and len(masks[0]) > 0:
+                        result_masks = masks[0]
+            except (TypeError, IndexError):
+                result_masks = []
+                
+            # mask_scoresの安全な処理  
+            try:
+                if mask_scores is not None and isinstance(mask_scores, (list, tuple)) and len(mask_scores) > 0:
+                    if isinstance(mask_scores[0], (list, tuple, np.ndarray)) and hasattr(mask_scores[0], '__len__') and len(mask_scores[0]) > 0:
+                        result_mask_scores = mask_scores[0]
+                    else:
+                        result_mask_scores = np.ones(len(tracked_boxes))
+                else:
+                    result_mask_scores = np.ones(len(tracked_boxes))
+            except (TypeError, IndexError):
+                result_mask_scores = np.ones(len(tracked_boxes))
+            
             return {
                 "boxes": np.array(tracked_boxes),
                 "labels": tracked_labels,
                 "scores": np.ones(len(tracked_boxes)),
-                "masks": masks[0] if masks else [],
-                "mask_scores": mask_scores[0] if mask_scores else []
+                "masks": result_masks,
+                "mask_scores": result_mask_scores
             }
             
-        except Exception:
+        except Exception as e:
+            print(f"SAM2処理エラー: {e}")
             return {
                 "boxes": np.array(tracked_boxes),
                 "labels": tracked_labels,
                 "scores": np.ones(len(tracked_boxes)),
                 "masks": [],
-                "mask_scores": []
+                "mask_scores": np.ones(len(tracked_boxes))  # デフォルトスコア
             }

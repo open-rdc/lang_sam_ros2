@@ -348,15 +348,60 @@ class LangSAMTrackerNode(Node):
             self.get_logger().error(f"Tracking error: {e}")
     
     def _publish_segmentation(self, image: np.ndarray, masks, mask_scores, boxes, labels, publisher):
-        """SAM2セグメンテーション結果配信"""
+        """SAM2セグメンテーション結果配信（安全な配列処理）"""
         try:
+            # 入力データの安全性チェック
+            boxes_array = np.array(boxes) if len(boxes) > 0 else np.array([])
+            if boxes_array.size == 0 or len(labels) == 0:
+                publisher.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
+                return
+            
+            # mask_scoresの安全な処理
+            try:
+                if isinstance(mask_scores, (list, tuple)):
+                    if len(mask_scores) == 0:
+                        mask_scores = np.ones(len(boxes))
+                    else:
+                        mask_scores = np.array(mask_scores)
+                elif isinstance(mask_scores, np.ndarray):
+                    if mask_scores.size == 0:
+                        mask_scores = np.ones(len(boxes))
+                else:
+                    mask_scores = np.ones(len(boxes))
+                
+                # 形状確認と修正
+                if mask_scores.ndim == 0:
+                    mask_scores = np.array([float(mask_scores)])
+                elif mask_scores.ndim > 1:
+                    mask_scores = mask_scores.flatten()
+                
+                # 長さ調整
+                if len(mask_scores) != len(boxes):
+                    mask_scores = np.ones(len(boxes))
+                    
+            except Exception:
+                mask_scores = np.ones(len(boxes))
+            
+            # masksの安全な処理
+            try:
+                if isinstance(masks, (list, tuple)) and len(masks) > 0:
+                    masks_array = np.array(masks)
+                    if masks_array.size == 0:
+                        masks_array = np.array([])
+                elif isinstance(masks, np.ndarray) and masks.size > 0:
+                    masks_array = masks
+                else:
+                    masks_array = np.array([])
+            except Exception:
+                masks_array = np.array([])
+            
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             
             result_image = draw_image(
                 image_rgb=image_rgb,
-                masks=np.array(masks),
-                xyxy=np.array(boxes),
-                probs=np.array(mask_scores),
+                masks=masks_array,
+                xyxy=boxes_array,
+                probs=mask_scores,
                 labels=labels
             )
             
@@ -365,6 +410,8 @@ class LangSAMTrackerNode(Node):
             
         except Exception as e:
             self.get_logger().error(f"Segmentation error: {e}")
+            # エラー時は元画像を配信
+            publisher.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
 
 
 def main(args=None):

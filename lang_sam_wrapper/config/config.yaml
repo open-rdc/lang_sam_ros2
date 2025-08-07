@@ -8,7 +8,7 @@ lang_sam_tracker_node:
     tracking_targets: ["white line", "red pylon", "human", "car"]
     
     # 実行設定
-    gdino_interval_seconds: 3.0  # GroundingDINO実行間隔（秒）
+    gdino_interval_seconds: 1.0  # GroundingDINO実行間隔（秒）
     enable_tracking: true        # CSRTトラッキング有効化
     enable_sam: true            # SAM2セグメンテーション有効化
     
