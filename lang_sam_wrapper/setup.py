@@ -37,7 +37,8 @@ setup(
     entry_points={
         'console_scripts': [
             'debug_lang_sam_node = lang_sam_wrapper.debug_lang_segment_anything:main',
-            'langsam_with_optflow_node = lang_sam_wrapper.langsam_with_optflow_node:main',
+            'lang_sam_tracker_node = lang_sam_wrapper.lang_sam_tracker_node:main',
+            'multi_view_node = lang_sam_wrapper.multi_view_node:main',
         ],
     },
 )

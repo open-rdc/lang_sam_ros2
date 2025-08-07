@@ -1,4 +1,4 @@
-langsam_with_optflow_node:
+lang_sam_tracker_node:
   ros__parameters:
     # モデル設定
     sam_model: "sam2.1_hiera_small"
@@ -8,7 +8,7 @@ langsam_with_optflow_node:
     tracking_targets: ["white line", "red pylon", "human", "car"]
     
     # 実行設定
-    pipeline_interval: 90        # 完全パイプライン実行間隔（フレーム）
+    gdino_interval_seconds: 3.0  # GroundingDINO実行間隔（秒）
     enable_tracking: true        # CSRTトラッキング有効化
     enable_sam: true            # SAM2セグメンテーション有効化
     
@@ -17,10 +17,24 @@ langsam_with_optflow_node:
     gdino_topic: "/image_gdino"
     csrt_topic: "/image_csrt"
     sam_topic: "/image_sam"
+
+multi_view_node:
+  ros__parameters:
+    # 入力トピック設定
+    original_topic: "/zed/zed_node/rgb/image_rect_color"
+    gdino_topic: "/image_gdino"
+    csrt_topic: "/image_csrt"
+    sam_topic: "/image_sam"
     
-    # CUDA設定
-    cuda_arch_list: "6.0;6.1;7.0;7.5;8.0;8.6"
-    enable_torch_no_grad: true
+    # 出力設定
+    output_fps: 30.0
+    output_width: 1280
+    output_height: 720
+    border_width: 2
+    border_color: [255, 255, 255]  # BGR白
     
-    # ログ・デバッグ設定
-    enable_debug: false
+    # ラベル設定
+    enable_labels: true
+    label_font_scale: 0.7
+    label_thickness: 2
+    label_color: [0, 0, 255]  # BGR緑

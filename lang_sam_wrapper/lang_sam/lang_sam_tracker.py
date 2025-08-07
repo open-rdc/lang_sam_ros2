@@ -116,15 +116,29 @@ class LangSAMTracker:
     def _init_trackers(self, boxes: np.ndarray, labels: List[str], image_np: np.ndarray):
         """CSRTトラッカー初期化"""
         try:
+            print(f"=== CSRT初期化開始 ===")
+            print(f"検出オブジェクト数: {len(boxes)}")
+            print(f"検出ラベル: {labels}")
+            print(f"トラッキング対象: {self.tracking_targets}")
+            
             # 既存トラッカークリア
+            old_count = len(self.trackers)
             self.trackers.clear()
             self.tracked_boxes.clear()
+            print(f"既存トラッカー{old_count}個をクリア")
             
             height, width = image_np.shape[:2]
+            print(f"画像サイズ: {width}x{height}")
+            successful_inits = 0
             
             for i, (box, label) in enumerate(zip(boxes, labels)):
+                print(f"処理中 {i}: ラベル='{label}', bbox={box}")
+                
                 # トラッキング対象チェック
-                if not any(target in label.lower() for target in self.tracking_targets):
+                is_target = any(target in label.lower() for target in self.tracking_targets)
+                print(f"トラッキング対象判定: {is_target}")
+                if not is_target:
+                    print(f"スキップ: '{label}'は対象外")
                     continue
                 
                 # 座標変換（正規化 → ピクセル）
@@ -134,89 +148,129 @@ class LangSAMTracker:
                         y1 = int(box[1] * height)
                         x2 = int(box[2] * width)
                         y2 = int(box[3] * height)
+                        print(f"正規化座標変換: {box} → ({x1},{y1},{x2},{y2})")
                     else:  # ピクセル座標
                         x1, y1, x2, y2 = [int(v) for v in box]
+                        print(f"ピクセル座標使用: ({x1},{y1},{x2},{y2})")
                 else:
+                    print(f"無効なbbox形式: {box}")
                     continue
                 
                 # 境界調整
                 margin = 5
                 min_size = 20
+                x1_orig, y1_orig, x2_orig, y2_orig = x1, y1, x2, y2
                 x1 = max(margin, min(x1, width - margin - min_size))
                 y1 = max(margin, min(y1, height - margin - min_size))
                 x2 = max(x1 + min_size, min(x2, width - margin))
                 y2 = max(y1 + min_size, min(y2, height - margin))
                 
+                if (x1_orig, y1_orig, x2_orig, y2_orig) != (x1, y1, x2, y2):
+                    print(f"境界調整: ({x1_orig},{y1_orig},{x2_orig},{y2_orig}) → ({x1},{y1},{x2},{y2})")
+                
                 bbox_width = x2 - x1
                 bbox_height = y2 - y1
+                print(f"bbox サイズ: {bbox_width}x{bbox_height}")
                 
                 if bbox_width < min_size or bbox_height < min_size:
+                    print(f"サイズ不足でスキップ: {bbox_width}x{bbox_height} < {min_size}")
                     continue
                 
-                # CSRTトラッカー初期化
-                tracker = cv2.TrackerCSRT_create()
+                # OpenCV 4.11.0対応のCSRTトラッカー初期化
+                try:
+                    # legacy APIを優先使用（OpenCV 4.x系の互換性問題対応）
+                    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+                        tracker = cv2.legacy.TrackerCSRT_create()
+                        print(f"Legacy CSRT使用")
+                    else:
+                        tracker = cv2.TrackerCSRT_create()
+                        print(f"標準CSRT使用")
+                except Exception as e:
+                    print(f"CSRTトラッカー作成失敗: {e}")
+                    continue
+                
                 tracker_bbox = (x1, y1, bbox_width, bbox_height)
                 
-                if tracker.init(image_np, tracker_bbox):
-                    tracker_label = f"{label}_{i}"
-                    self.trackers[tracker_label] = tracker
-                    self.tracked_boxes[tracker_label] = [x1, y1, x2, y2]
+                # 画像形式を統一（BGR）
+                init_image = image_np if len(image_np.shape) == 3 else cv2.cvtColor(image_np, cv2.COLOR_GRAY2BGR)
+                
+                # トラッカー初期化実行
+                try:
+                    init_result = tracker.init(init_image, tracker_bbox)
+                    if init_result:
+                        tracker_label = f"{label}_{i}"
+                        self.trackers[tracker_label] = tracker
+                        self.tracked_boxes[tracker_label] = [x1, y1, x2, y2]
+                        successful_inits += 1
+                        print(f"SUCCESS: '{tracker_label}' 初期化成功 bbox={tracker_bbox}")
+                    else:
+                        print(f"FAILED: '{label}_{i}' 初期化失敗")
+                        
+                except Exception as e:
+                    print(f"FAILED: '{label}_{i}' 初期化例外 {e}")
+            
+            print(f"=== CSRT初期化完了: {successful_inits}/{len(boxes)}個成功 ===")
                     
         except Exception as e:
-            print(f"トラッカー初期化エラー: {e}")
+            print(f"CSRT初期化エラー: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _update_existing_trackers(self, image_np: np.ndarray):
-        """既存トラッカー更新"""
+        """最適化されたCSRTトラッカー更新"""
         if not self.trackers:
+            print("CSRTアップデート: トラッカーなし")
             return
         
+        print(f"CSRTアップデート: {len(self.trackers)}個のトラッカーを更新")
         labels_to_remove = []
         height, width = image_np.shape[:2]
+        successful_updates = 0
+        
+        # BGR画像使用（一貫性保持）
+        bgr_image = image_np if len(image_np.shape) == 3 else cv2.cvtColor(image_np, cv2.COLOR_GRAY2BGR)
         
         for label, tracker in self.trackers.items():
             try:
-                success, bbox = tracker.update(image_np)
+                success, bbox = tracker.update(bgr_image)
                 
                 if success and bbox is not None:
-                    x1, y1, w, h = bbox
+                    x1, y1, w, h = [int(v) for v in bbox]
                     x2, y2 = x1 + w, y1 + h
                     
-                    # 境界・サイズチェック
+                    # 境界チェック
                     if (0 <= x1 < width and 0 <= y1 < height and 
-                        x2 <= width and y2 <= height and w > 20 and h > 20):
+                        x2 <= width and y2 <= height and w > 15 and h > 15):
                         self.tracked_boxes[label] = [x1, y1, x2, y2]
+                        successful_updates += 1
+                        print(f"SUCCESS: '{label}' → ({x1},{y1},{x2},{y2})")
                     else:
+                        print(f"FAIL: '{label}' 境界外 ({x1},{y1},{x2},{y2}) in {width}x{height}")
                         labels_to_remove.append(label)
                 else:
+                    print(f"FAIL: '{label}' トラッキング失敗 success={success}, bbox={bbox}")
                     labels_to_remove.append(label)
                     
-            except Exception:
+            except Exception as e:
+                print(f"FAIL: '{label}' 例外発生 {e}")
                 labels_to_remove.append(label)
         
         # 失敗したトラッカー削除
+        if labels_to_remove:
+            print(f"削除: {labels_to_remove}")
         for label in labels_to_remove:
             if label in self.trackers:
                 del self.trackers[label]
             if label in self.tracked_boxes:
                 del self.tracked_boxes[label]
+        
+        print(f"CSRTアップデート完了: {successful_updates}/{len(self.trackers) + len(labels_to_remove)}個成功")
     
     def update_trackers_only(self, image_np: np.ndarray) -> dict:
-        """トラッカーのみ更新（検出なし）"""
+        """CSRT tracking only (fast)"""
         self._update_existing_trackers(image_np)
         
-        if self.tracked_boxes:
-            tracked_boxes = list(self.tracked_boxes.values())
-            tracked_labels = list(self.tracked_boxes.keys())
-            tracked_scores = [1.0] * len(tracked_boxes)
-            
-            return {
-                "boxes": np.array(tracked_boxes),
-                "labels": tracked_labels,
-                "scores": np.array(tracked_scores),
-                "masks": [],
-                "mask_scores": []
-            }
-        else:
+        if not self.tracked_boxes:
             return {
                 "boxes": np.array([]),
                 "labels": [],
@@ -224,6 +278,14 @@ class LangSAMTracker:
                 "masks": [],
                 "mask_scores": []
             }
+            
+        return {
+            "boxes": np.array(list(self.tracked_boxes.values())),
+            "labels": list(self.tracked_boxes.keys()),
+            "scores": np.ones(len(self.tracked_boxes)),
+            "masks": [],
+            "mask_scores": []
+        }
     
     def set_tracking_targets(self, targets: List[str]):
         """トラッキング対象設定"""
@@ -233,3 +295,54 @@ class LangSAMTracker:
         """全トラッカークリア"""
         self.trackers.clear()
         self.tracked_boxes.clear()
+    
+    def update_trackers_with_sam(self, image_np: np.ndarray) -> dict:
+        """Optimized CSRT + SAM2 (every frame)"""
+        # Update CSRT trackers
+        self._update_existing_trackers(image_np)
+        
+        if not self.tracked_boxes:
+            return {
+                "boxes": np.array([]),
+                "labels": [],
+                "scores": np.array([]),
+                "masks": [],
+                "mask_scores": []
+            }
+        
+        tracked_boxes = list(self.tracked_boxes.values())
+        tracked_labels = list(self.tracked_boxes.keys())
+        
+        # Skip SAM2 if no tracked boxes
+        if len(tracked_boxes) == 0:
+            return {
+                "boxes": np.array([]),
+                "labels": [],
+                "scores": np.array([]),
+                "masks": [],
+                "mask_scores": []
+            }
+        
+        try:
+            # Fast SAM2 prediction on valid boxes
+            masks, mask_scores, _ = self.sam.predict_batch(
+                [image_np], 
+                xyxy=[np.array(tracked_boxes)]
+            )
+            
+            return {
+                "boxes": np.array(tracked_boxes),
+                "labels": tracked_labels,
+                "scores": np.ones(len(tracked_boxes)),
+                "masks": masks[0] if masks else [],
+                "mask_scores": mask_scores[0] if mask_scores else []
+            }
+            
+        except Exception:
+            return {
+                "boxes": np.array(tracked_boxes),
+                "labels": tracked_labels,
+                "scores": np.ones(len(tracked_boxes)),
+                "masks": [],
+                "mask_scores": []
+            }

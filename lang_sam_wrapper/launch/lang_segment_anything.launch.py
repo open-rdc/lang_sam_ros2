@@ -23,20 +23,26 @@ def generate_launch_description():
 
     # ノードの定義とLaunchDescriptionの生成
     return LaunchDescription([
-        # 最適化されたLangSAM + Optical Flowノード
+        # LangSAM integrated tracking node
         Node(
             package='lang_sam_wrapper',
-            executable='langsam_with_optflow_node',
-            name='langsam_with_optflow_node',
+            executable='lang_sam_tracker_node',
+            name='lang_sam_tracker_node',
             output='screen',
             parameters=[config_file],
             remappings=[
                 ('/image', '/zed/zed_node/rgb/image_rect_color'),
                 ('/image_sam', '/image_sam'),
                 ('/sam_masks', '/sam_masks'),
-                ('/image_optflow', '/image_optflow'),
-                ('/image_grounding_dino', '/image_grounding_dino'),
             ],
+        ),
+        # マルチビュー統合ノード
+        Node(
+            package='lang_sam_wrapper',
+            executable='multi_view_node',
+            name='multi_view_node',
+            output='screen',
+            parameters=[config_file],
         ),
         # デバッグ用LangSAMノード（必要に応じてコメントアウト解除）
         # Node(
