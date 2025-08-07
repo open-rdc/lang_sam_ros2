@@ -37,17 +37,29 @@ class LangSAMTrackerNode(Node):
     def __init__(self):
         super().__init__('lang_sam_tracker_node')
         
-        # Core components initialization
-        self.bridge = CvBridge()
-        self.last_gdino_time = 0.0
-        self.gdino_processing = False
-        self.gdino_start_time = None  # GDINO処理開始時刻
-        self.lock = threading.Lock()
-        self.thread_pool = ThreadPoolExecutor(max_workers=1)
+        # 初期化フラグ（安全性のため最初に設定）
+        self.initialization_complete = False
         
-        # フレームバッファ（3秒履歴、約90フレーム@30fps）
-        self.frame_buffer: deque[FrameData] = deque(maxlen=100)
-        self.buffer_lock = threading.Lock()
+        # Core components initialization
+        try:
+            self.get_logger().info("Initializing core components...")
+            self.bridge = CvBridge()
+            self.last_gdino_time = 0.0
+            self.gdino_processing = False
+            self.gdino_start_time = None  # GDINO処理開始時刻
+            self.lock = threading.Lock()
+            self.get_logger().info("Threading locks created")
+            
+            self.thread_pool = ThreadPoolExecutor(max_workers=1)
+            self.get_logger().info("Thread pool created")
+            
+            # フレームバッファ（3秒履歴、約90フレーム@30fps）
+            self.frame_buffer: deque[FrameData] = deque(maxlen=100)
+            self.buffer_lock = threading.Lock()
+            self.get_logger().info("Frame buffer initialized")
+        except Exception as e:
+            self.get_logger().error(f"Failed to initialize core components: {e}")
+            raise
         
         # Load all parameters from config.yaml
         self._declare_all_parameters()
@@ -56,26 +68,47 @@ class LangSAMTrackerNode(Node):
         # CUDA environment configuration
         self._setup_cuda_environment()
         
-        # Initialize integrated LangSAM tracker
-        self.tracker = LangSAMTracker(sam_type=self.sam_model)
-        self.tracker.set_tracking_targets(self.tracking_targets)
+        # Initialize integrated LangSAM tracker with error handling
+        try:
+            self.get_logger().info("LangSAM tracker initialization starting...")
+            self.tracker = LangSAMTracker(sam_type=self.sam_model)
+            self.get_logger().info("LangSAM tracker created successfully")
+            self.tracker.set_tracking_targets(self.tracking_targets)
+            self.get_logger().info("Tracking targets set successfully")
+        except Exception as e:
+            self.get_logger().error(f"Failed to initialize LangSAM tracker: {e}")
+            raise
         
         # ROS2 communication setup (parameterized topics)
-        self.image_sub = self.create_subscription(
-            Image, self.input_topic, self.image_callback, 10
-        )
+        try:
+            self.get_logger().info("Setting up ROS2 communication...")
+            self.image_sub = self.create_subscription(
+                Image, self.input_topic, self.image_callback, 10
+            )
+            self.get_logger().info(f"Subscribed to: {self.input_topic}")
+            
+            # Triple output publishers (parameterized)
+            self.gdino_pub = self.create_publisher(Image, self.gdino_topic, 10)
+            self.csrt_pub = self.create_publisher(Image, self.csrt_topic, 10)
+            self.sam_pub = self.create_publisher(Image, self.sam_topic, 10)
+            self.get_logger().info("Publishers created successfully")
+        except Exception as e:
+            self.get_logger().error(f"Failed to setup ROS2 communication: {e}")
+            raise
         
-        # Triple output publishers (parameterized)
-        self.gdino_pub = self.create_publisher(Image, self.gdino_topic, 10)
-        self.csrt_pub = self.create_publisher(Image, self.csrt_topic, 10)
-        self.sam_pub = self.create_publisher(Image, self.sam_topic, 10)
-        
-        self.get_logger().info(f"LangSAM Tracker initialized: {self.sam_model}")
+        # 初期化完了フラグ
+        self.initialization_complete = True
+        self.get_logger().info(f"LangSAM Tracker fully initialized: {self.sam_model}")
     
     def destroy_node(self):
         """Clean shutdown with thread pool cleanup"""
-        self.thread_pool.shutdown(wait=True)
-        super().destroy_node()
+        try:
+            if hasattr(self, 'thread_pool'):
+                self.thread_pool.shutdown(wait=True)
+        except Exception as e:
+            self.get_logger().error(f"Error during thread pool shutdown: {e}")
+        finally:
+            super().destroy_node()
     
     def _declare_all_parameters(self):
         """Declare all ROS2 parameters"""
@@ -120,12 +153,25 @@ class LangSAMTrackerNode(Node):
     
     def _setup_cuda_environment(self):
         """Configure CUDA environment"""
-        warnings.filterwarnings("ignore", category=UserWarning)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        try:
+            self.get_logger().info("Setting up CUDA environment...")
+            warnings.filterwarnings("ignore", category=UserWarning)
+            if torch.cuda.is_available():
+                self.get_logger().info(f"CUDA available: {torch.cuda.device_count()} devices")
+                torch.cuda.empty_cache()
+                self.get_logger().info("CUDA cache cleared")
+            else:
+                self.get_logger().info("CUDA not available, using CPU")
+        except Exception as e:
+            self.get_logger().error(f"Failed to setup CUDA environment: {e}")
+            raise
     
     def image_callback(self, msg: Image):
         """フレームバッファ機能付きメイン処理"""
+        # 初期化完了チェック
+        if not hasattr(self, 'initialization_complete') or not self.initialization_complete:
+            return
+            
         try:
             image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             current_time = time.time()
@@ -159,23 +205,14 @@ class LangSAMTrackerNode(Node):
     def _async_gdino_processing(self):
         """GDINO処理 + フレーム履歴遡り + トラッカー早送り"""
         try:
-            print("\n=== GDINO処理開始 ===")
             # 処理開始時点のフレーム取得
             start_frame = self._get_frame_at_time(self.gdino_start_time)
             if start_frame is None:
-                print("ERROR: 開始時点のフレームが見つからない")
                 return
-            
-            print(f"処理開始時刻: {self.gdino_start_time}")
-            print(f"フレームサイズ: {start_frame.shape}")
             
             # GDINO実行（処理開始時点のフレーム使用）
             image_rgb = cv2.cvtColor(start_frame, cv2.COLOR_BGR2RGB)
             pil_image = PILImage.fromarray(image_rgb)
-            print(f"PIL画像作成: {pil_image.size}")
-            
-            print(f"GDINO実行開始 - prompt: '{self.text_prompt}'")
-            print(f"閾値: box={self.box_threshold}, text={self.text_threshold}")
             
             with warnings.catch_warnings(), torch.no_grad():
                 warnings.simplefilter("ignore")
@@ -188,8 +225,6 @@ class LangSAMTrackerNode(Node):
                     run_sam=False
                 )
             
-            print(f"GDINO実行完了 - 結果数: {len(results) if results else 0}")
-            
             # GDINO結果処理
             if results and len(results) > 0:
                 result = results[0]
@@ -197,24 +232,13 @@ class LangSAMTrackerNode(Node):
                 labels = result.get('labels', [])
                 scores = result.get('scores', [])
                 
-                print(f"検出結果: {len(boxes)}個のオブジェクト")
-                print(f"ラベル: {labels}")
-                print(f"スコア: {scores}")
-                print(f"bbox: {boxes}")
-                
                 self._publish_detection(start_frame, boxes, labels, scores, self.gdino_pub)
                 
                 # トラッカー早送り（処理開始時点→現在まで）
                 self._fast_forward_trackers()
-            else:
-                print("GDINO検出結果なし")
-            
-            print("=== GDINO処理完了 ===\n")
                 
         except Exception as e:
-            print(f"GDINO ERROR: {e}")
-            import traceback
-            traceback.print_exc()
+            self.get_logger().error(f"GDINO ERROR: {e}")
         finally:
             with self.lock:
                 self.gdino_processing = False
@@ -223,34 +247,25 @@ class LangSAMTrackerNode(Node):
         """指定時刻に最も近いフレームを取得"""
         with self.buffer_lock:
             if not self.frame_buffer:
-                print("ERROR: フレームバッファが空")
                 return None
             
-            print(f"フレームバッファサイズ: {len(self.frame_buffer)}")
             # 時刻差最小のフレーム検索
             best_frame = min(self.frame_buffer, key=lambda f: abs(f.timestamp - target_time))
-            time_diff = abs(best_frame.timestamp - target_time)
-            print(f"最適フレーム選択: 時差{time_diff:.3f}秒")
             return best_frame.image
     
     def _fast_forward_trackers(self):
         """トラッカーを処理開始時点から現在まで早送り"""
         if not self.gdino_start_time:
-            print("WARNING: GDINO開始時刻が未設定")
             return
         
         with self.buffer_lock:
             # 処理開始時点以降のフレーム抽出
             recent_frames = [f for f in self.frame_buffer if f.timestamp > self.gdino_start_time]
         
-        print(f"早送り処理: {len(recent_frames)}フレームを処理")
         # 早送り実行（効率化のため間引き処理）
-        processed_count = 0
         for i, frame_data in enumerate(recent_frames):
             if i % 2 == 0:  # 2フレームおきに処理
                 self.tracker._update_existing_trackers(frame_data.image)
-                processed_count += 1
-        print(f"早送り完了: {processed_count}フレーム処理済み")
     
     def _run_csrt_and_sam(self, image: np.ndarray):
         """CSRT+SAM2毎フレーム実行（最適化版）"""
@@ -268,14 +283,6 @@ class LangSAMTrackerNode(Node):
             masks = result.get('masks', [])
             mask_scores = result.get('mask_scores', [])
             
-            # 定期的にトラッキング状況をログ出力（100フレームに1回）
-            if hasattr(self, 'frame_count'):
-                self.frame_count += 1
-            else:
-                self.frame_count = 1
-            
-            if self.frame_count % 100 == 0:
-                print(f"フレーム{self.frame_count}: トラッカー{tracker_count}個, 追跡{len(boxes)}個")
             
             # CSRT結果配信
             self._publish_tracking(image, boxes, labels, self.csrt_pub)
@@ -289,9 +296,7 @@ class LangSAMTrackerNode(Node):
                     self.sam_pub.publish(msg)
                 
         except Exception as e:
-            print(f"CSRT+SAM ERROR: {e}")
-            import traceback
-            traceback.print_exc()
+            self.get_logger().error(f"CSRT+SAM ERROR: {e}")
     
     
     def _publish_detection(self, image: np.ndarray, boxes, labels, scores, publisher):
