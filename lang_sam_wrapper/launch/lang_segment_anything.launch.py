@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 最適化されたLangSAM + オプティカルフロー統合launchファイル
-テキストプロンプト → GroundingDINO → 複数特徴点追跡 → SAM2セグメンテーション
+テキストプロンプト → GroundingDINO → CSRT → SAM2セグメンテーション
 """
 
 from launch import LaunchDescription
