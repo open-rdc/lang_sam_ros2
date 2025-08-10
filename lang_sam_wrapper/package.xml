@@ -12,6 +12,16 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>lang_sam_msgs</exec_depend>
+  
+  <!-- AI/ML依存パッケージ -->
+  <exec_depend>python3-torch</exec_depend>
+  <exec_depend>python3-torchvision</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  
+  <!-- 外部Pythonパッケージ -->
+  <exec_depend>python3-pip</exec_depend> <!-- lang_sam, supervisionインストール用 -->
 
   <!-- テスト依存 -->
   <test_depend>ament_copyright</test_depend>

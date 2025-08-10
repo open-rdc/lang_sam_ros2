@@ -15,9 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from PIL import Image as PILImage
 
 # LangSAM統合トラッカー（GroundingDINO + CSRT + SAM2）
-import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'lang_sam'))
-from lang_sam_tracker import LangSAMTracker
+from lang_sam.lang_sam_tracker import LangSAMTracker
 from lang_sam.utils import draw_image
 
 
@@ -74,6 +72,11 @@ class LangSAMTrackerNode(Node):
         self.declare_parameter('csrt_topic', '/image_csrt')
         self.declare_parameter('sam_topic', '/image_sam')
         
+        # トラッキング設定
+        self.declare_parameter('bbox_margin', 5)
+        self.declare_parameter('bbox_min_size', 20)
+        self.declare_parameter('tracker_min_size', 10)
+        
         # パラメータ値読み込み
         self.sam_model = self.get_parameter('sam_model').value
         self.text_prompt = self.get_parameter('text_prompt').value
@@ -89,6 +92,10 @@ class LangSAMTrackerNode(Node):
         self.gdino_topic = self.get_parameter('gdino_topic').value
         self.csrt_topic = self.get_parameter('csrt_topic').value
         self.sam_topic = self.get_parameter('sam_topic').value
+        
+        self.bbox_margin = self.get_parameter('bbox_margin').value
+        self.bbox_min_size = self.get_parameter('bbox_min_size').value
+        self.tracker_min_size = self.get_parameter('tracker_min_size').value
     
     def _setup_cuda_environment(self):
         """CUDA環境設定（GPU最適化）"""
@@ -101,6 +108,11 @@ class LangSAMTrackerNode(Node):
         try:
             self.tracker = LangSAMTracker(sam_type=self.sam_model)
             self.tracker.set_tracking_targets(self.tracking_targets)
+            self.tracker.set_tracking_config({
+                'bbox_margin': self.bbox_margin,
+                'bbox_min_size': self.bbox_min_size,
+                'tracker_min_size': self.tracker_min_size
+            })
         except Exception as e:
             self.get_logger().error(f"トラッカー初期化失敗: {e}")
             raise
@@ -251,6 +263,26 @@ class LangSAMTrackerNode(Node):
         except Exception:
             pass
     
+    def _convert_bgr_to_rgb_and_draw(self, image: np.ndarray, masks, boxes, labels, scores):
+        """BGR→RGB変換と描画の統一処理"""
+        height, width = image.shape[:2]
+        if len(masks) == 0:
+            dummy_masks = np.zeros((len(boxes), height, width), dtype=bool)
+        else:
+            dummy_masks = masks
+            
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        result_image = draw_image(
+            image_rgb=image_rgb,
+            masks=dummy_masks,
+            xyxy=np.array(boxes),
+            probs=np.array(scores),
+            labels=labels
+        )
+        
+        return cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR)
+    
     def _publish_detection(self, image: np.ndarray, boxes, labels, scores, publisher):
         """GroundingDINO検出結果配信（BoundingBox + ラベル描画）"""
         try:
@@ -258,21 +290,7 @@ class LangSAMTrackerNode(Node):
                 publisher.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
                 return
             
-            # Supervision描画ライブラリ使用（BGR→RGB→BGR変換）
-            height, width = image.shape[:2]
-            dummy_masks = np.zeros((len(boxes), height, width), dtype=bool)
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            
-            result_image = draw_image(
-                image_rgb=image_rgb,
-                masks=dummy_masks,
-                xyxy=np.array(boxes),
-                probs=np.array(scores),
-                labels=labels
-            )
-            
-            # RGB→BGR変換してROS配信
-            result_bgr = cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR)
+            result_bgr = self._convert_bgr_to_rgb_and_draw(image, [], boxes, labels, scores)
             publisher.publish(self.bridge.cv2_to_imgmsg(result_bgr, 'bgr8'))
             
         except Exception as e:
@@ -286,21 +304,8 @@ class LangSAMTrackerNode(Node):
                 publisher.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
                 return
             
-            # Supervision描画（BGR→RGB→BGR変換）
-            height, width = image.shape[:2]
-            dummy_masks = np.zeros((len(boxes), height, width), dtype=bool)
             dummy_scores = np.ones(len(boxes))
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            
-            result_image = draw_image(
-                image_rgb=image_rgb,
-                masks=dummy_masks,
-                xyxy=np.array(boxes),
-                probs=dummy_scores,
-                labels=labels
-            )
-            
-            result_bgr = cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR)
+            result_bgr = self._convert_bgr_to_rgb_and_draw(image, [], boxes, labels, dummy_scores)
             publisher.publish(self.bridge.cv2_to_imgmsg(result_bgr, 'bgr8'))
             
         except Exception as e:
@@ -330,18 +335,7 @@ class LangSAMTrackerNode(Node):
             else:
                 masks_array = np.array([])
             
-            # Supervision描画（BGR→RGB→BGR変換）
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            
-            result_image = draw_image(
-                image_rgb=image_rgb,
-                masks=masks_array,
-                xyxy=boxes_array,
-                probs=mask_scores,
-                labels=labels
-            )
-            
-            result_bgr = cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR)
+            result_bgr = self._convert_bgr_to_rgb_and_draw(image, masks_array, boxes_array, labels, mask_scores)
             publisher.publish(self.bridge.cv2_to_imgmsg(result_bgr, 'bgr8'))
             
         except Exception as e:

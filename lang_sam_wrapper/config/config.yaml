@@ -17,6 +17,11 @@ lang_sam_tracker_node:
     gdino_topic: "/image_gdino"    # GroundingDINO検出結果配信
     csrt_topic: "/image_csrt"      # CSRT追跡結果配信
     sam_topic: "/image_sam"        # SAM2セグメンテーション結果配信
+    
+    # ===== トラッキング設定 =====
+    bbox_margin: 5                 # BoundingBox境界マージン（ピクセル）
+    bbox_min_size: 20              # 最小BoundingBoxサイズ（ピクセル）
+    tracker_min_size: 10           # トラッカー継続最小サイズ（ピクセル）
 
 multi_view_node:
   ros__parameters:

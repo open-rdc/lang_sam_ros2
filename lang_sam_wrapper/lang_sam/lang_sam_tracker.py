@@ -1,7 +1,7 @@
 import numpy as np
 import cv2
 from PIL import Image
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union, Tuple
 
 from lang_sam.models.gdino import GDINO
 from lang_sam.models.sam import SAM
@@ -17,7 +17,7 @@ class LangSAMTracker:
     3. SAM2: Segment Anything Model 2 → 高精度セグメンテーション
     """
     
-    def __init__(self, sam_type="sam2.1_hiera_small", ckpt_path: str | None = None, device=DEVICE):
+    def __init__(self, sam_type: str = "sam2.1_hiera_small", ckpt_path: Optional[str] = None, device=DEVICE):
         self.sam_type = sam_type
         
         # LangSAMモデル群初期化（GPU推論用）
@@ -30,16 +30,23 @@ class LangSAMTracker:
         self.trackers: Dict[str, cv2.TrackerCSRT] = {}  # OpenCVトラッカー辞書
         self.tracked_boxes: Dict[str, List[float]] = {}  # 追跡中BoundingBox座標
         self.tracking_targets: List[str] = ["white line", "red pylon", "human", "car"]
+        
+        # デフォルト設定値
+        self.config = {
+            'bbox_margin': 5,
+            'bbox_min_size': 20,
+            'tracker_min_size': 10
+        }
     
     def predict_with_tracking(
         self,
-        images_pil: list[Image.Image],
-        texts_prompt: list[str],
+        images_pil: List[Image.Image],
+        texts_prompt: List[str],
         box_threshold: float = 0.3,
         text_threshold: float = 0.25,
         update_trackers: bool = True,
         run_sam: bool = True
-    ):
+    ) -> List[Dict]:
         """GroundingDINO → CSRT → SAM2 統合推論パイプライン"""
         
         # ステップ1: GroundingDINOによるテキストプロンプト検出
@@ -85,7 +92,7 @@ class LangSAMTracker:
         
         return all_results
     
-    def _update_tracking(self, gdino_result: dict, image_np: np.ndarray) -> dict:
+    def _update_tracking(self, gdino_result: Dict, image_np: np.ndarray) -> Dict:
         """CSRT追跡状態更新（GroundingDINO検出結果ベース）"""
         try:
             boxes = gdino_result["boxes"]
@@ -115,7 +122,11 @@ class LangSAMTracker:
             else:
                 return gdino_result
                 
-        except Exception:
+        except (ValueError, TypeError, IndexError, AttributeError) as e:
+            print(f"Warning: CSRT tracking update failed: {e}")
+            return gdino_result
+        except Exception as e:
+            print(f"Error: Unexpected error in tracking update: {e}")
             return gdino_result
     
     def _init_trackers(self, boxes: np.ndarray, labels: List[str], image_np: np.ndarray):
@@ -145,8 +156,8 @@ class LangSAMTracker:
                     continue
                 
                 # BoundingBox境界調整（画像サイズ制約）
-                margin = 5
-                min_size = 20
+                margin = self.config['bbox_margin']
+                min_size = self.config['bbox_min_size']
                 x1 = max(margin, min(x1, width - margin - min_size))
                 y1 = max(margin, min(y1, height - margin - min_size))
                 x2 = max(x1 + min_size, min(x2, width - margin))
@@ -216,7 +227,8 @@ class LangSAMTracker:
                     h_clipped = y2_clipped - y1_clipped
                     
                     # クリップ後最小サイズチェック
-                    if w_clipped > 10 and h_clipped > 10:
+                    tracker_min_size = self.config['tracker_min_size']
+                    if w_clipped > tracker_min_size and h_clipped > tracker_min_size:
                         self.tracked_boxes[label] = [x1_clipped, y1_clipped, x2_clipped, y2_clipped]
                     else:
                         labels_to_remove.append(label)
@@ -231,7 +243,7 @@ class LangSAMTracker:
             self.trackers.pop(label, None)
             self.tracked_boxes.pop(label, None)
     
-    def update_trackers_only(self, image_np: np.ndarray) -> dict:
+    def update_trackers_only(self, image_np: np.ndarray) -> Dict:
         """CSRT追跡のみ実行（高速版、SAM2無し）"""
         self._update_existing_trackers(image_np)
         
@@ -252,7 +264,7 @@ class LangSAMTracker:
             "mask_scores": []
         }
     
-    def update_trackers_with_sam(self, image_np: np.ndarray) -> dict:
+    def update_trackers_with_sam(self, image_np: np.ndarray) -> Dict:
         """CSRT追跡 + SAM2セグメンテーション統合実行（毎フレーム版）"""
         # CSRT状態更新
         self._update_existing_trackers(image_np)
@@ -328,11 +340,15 @@ class LangSAMTracker:
                 "mask_scores": np.ones(len(tracked_boxes))
             }
     
-    def set_tracking_targets(self, targets: List[str]):
+    def set_tracking_targets(self, targets: List[str]) -> None:
         """追跡対象ラベル設定"""
         self.tracking_targets = targets
     
-    def clear_trackers(self):
+    def set_tracking_config(self, config: Dict[str, int]) -> None:
+        """トラッキング設定更新"""
+        self.config.update(config)
+    
+    def clear_trackers(self) -> None:
         """全トラッカー状態クリア"""
         self.trackers = {}
         self.tracked_boxes = {}
