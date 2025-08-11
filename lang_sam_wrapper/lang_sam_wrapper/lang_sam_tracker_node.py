@@ -17,6 +17,7 @@ from PIL import Image as PILImage
 # LangSAM統合トラッカー（GroundingDINO + CSRT + SAM2）
 from lang_sam.lang_sam_tracker import LangSAMTracker
 from lang_sam.utils import draw_image
+from lang_sam.frame_buffer import RealtimeFrameManager
 
 # ROS2関係のユーティリティ
 from lang_sam_wrapper.utils import TrackerParameterManager, ImagePublisher
@@ -41,6 +42,9 @@ class LangSAMTrackerNode(Node):
         self.gdino_processing = False
         self.lock = threading.Lock()
         self.thread_pool = ThreadPoolExecutor(max_workers=1)
+        
+        # フレームバッファシステム（遅延補正用）
+        self.frame_manager = RealtimeFrameManager(buffer_duration=5.0)
         
         # パラメータ管理（簡素化）
         param_manager = TrackerParameterManager(self)
@@ -114,11 +118,14 @@ class LangSAMTrackerNode(Node):
         super().destroy_node()
     
     def image_callback(self, msg: Image):
-        """メイン画像処理（リアルタイム追跡・遅延最小化版）"""
+        """メイン画像処理（フレームバッファリング対応）"""
         try:
             # ROS Image → OpenCV numpy変換（BGR色空間）
             image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             current_time = time.time()
+            
+            # フレームマネージャーに最新フレーム登録
+            self.frame_manager.process_incoming_frame(image)
             
             # GroundingDINO実行判定（時間ベース・非同期）
             with self.lock:
@@ -127,11 +134,16 @@ class LangSAMTrackerNode(Node):
                     and not self.gdino_processing
                 )
             
-            # GroundingDINO非同期実行（1Hz、遅延最小化のため現在フレーム使用）
+            # GroundingDINO非同期実行（バッファリング開始）
             if should_run_gdino:
                 with self.lock:
                     self.gdino_processing = True
                     self.last_gdino_time = current_time
+                
+                # フレームバッファリング開始
+                self.frame_manager.start_gdino_processing()
+                
+                # GroundingDINO処理開始（最新フレーム使用）
                 self.thread_pool.submit(self._async_gdino_processing, image.copy())
             
             # CSRT+SAM2同期実行（30Hz、毎フレーム）
@@ -162,21 +174,44 @@ class LangSAMTrackerNode(Node):
                     texts_prompt=[self.text_prompt],
                     box_threshold=self.box_threshold,
                     text_threshold=self.text_threshold,
-                    update_trackers=True,  # CSRTトラッカー同時初期化
+                    update_trackers=False,  # フレームバッファでのみ初期化
                     run_sam=False  # SAM2は毎フレーム実行のため無効化
                 )
             
-            # 検出結果処理・配信
+            # 検出結果処理・フレームバッファキャッチアップ
             if results and len(results) > 0:
                 result = results[0]
                 boxes = result.get('boxes', [])
                 labels = result.get('labels', [])
                 scores = result.get('scores', [])
                 
-                self._publish_detection(frame, boxes, labels, scores, self.gdino_pub)
+                # フレームバッファシステムで高速キャッチアップ実行
+                if hasattr(self.tracker, 'coordinator') and hasattr(self.tracker.coordinator, 'tracking_manager'):
+                    tracking_manager = self.tracker.coordinator.tracking_manager
+                    if tracking_manager:
+                        # キャッチアップ実行（最新フレームまで高速追跡）
+                        updated_result = self.frame_manager.complete_gdino_processing(result, tracking_manager)
+                        boxes = updated_result.get('boxes', [])
+                        labels = updated_result.get('labels', [])
+                        scores = updated_result.get('scores', [])
+                        
+                        # 統計情報をログ出力
+                        stats = self.frame_manager.get_stats()
+                        if stats['total_buffered'] > 0:
+                            self.get_logger().info(
+                                f"キャッチアップ完了: {stats['total_buffered']}フレーム "
+                                f"({stats['last_catchup_duration']:.3f}秒)"
+                            )
+                
+                # 最新フレームでの検出結果配信
+                latest_frame = self.frame_manager.get_latest_frame()
+                display_frame = latest_frame if latest_frame is not None else frame
+                self._publish_detection(display_frame, boxes, labels, scores, self.gdino_pub)
             else:
-                # 検出なし時は元画像配信
-                self.gdino_pub.publish(self.bridge.cv2_to_imgmsg(frame, 'bgr8'))
+                # 検出なし時は最新フレーム配信
+                latest_frame = self.frame_manager.get_latest_frame()
+                display_frame = latest_frame if latest_frame is not None else frame
+                self.gdino_pub.publish(self.bridge.cv2_to_imgmsg(display_frame, 'bgr8'))
                 
         except Exception as e:
             self.get_logger().error(f"GroundingDINOエラー: {e}")

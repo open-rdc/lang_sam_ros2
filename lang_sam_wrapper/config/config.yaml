@@ -1,7 +1,7 @@
 lang_sam_tracker_node:
   ros__parameters:
     # ===== AIモデル設定 =====
-    sam_model: "sam2.1_hiera_small"  # SAM2モデル（small/base/large）
+    sam_model: "sam2.1_hiera_tiny"  # SAM2モデル（tiny/small/base/large）
     text_prompt: "white line. red pylon. human. car."  # GroundingDINO検出プロンプト
     box_threshold: 0.3  # GroundingDINO BoundingBox信頼度閾値
     text_threshold: 0.25  # GroundingDINO テキスト類似度閾値
