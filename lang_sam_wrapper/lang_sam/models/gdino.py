@@ -37,12 +37,5 @@ class GDINO:
 
 
 if __name__ == "__main__":
-    gdino = GDINO()
-    gdino.build_model()
-    out = gdino.predict(
-        [Image.open("./assets/car.jpeg"), Image.open("./assets/car.jpeg")],
-        ["wheel", "wheel"],
-        0.3,
-        0.25,
-    )
-    print(out)
+    # デバッグ用コード（本番環境では無効）
+    pass

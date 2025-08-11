@@ -4,7 +4,7 @@ lang_sam_tracker_node:
     sam_model: "sam2.1_hiera_small"  # SAM2モデル（small/base/large）
     text_prompt: "white line. red pylon. human. car."  # GroundingDINO検出プロンプト
     box_threshold: 0.3  # GroundingDINO BoundingBox信頼度閾値
-    text_threshold: 0.2  # GroundingDINO テキスト類似度閾値
+    text_threshold: 0.25  # GroundingDINO テキスト類似度閾値
     tracking_targets: ["white line", "red pylon", "human", "car"]  # CSRT追跡対象
     
     # ===== 実行周波数設定 =====

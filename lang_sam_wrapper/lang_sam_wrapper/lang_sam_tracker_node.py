@@ -18,6 +18,9 @@ from PIL import Image as PILImage
 from lang_sam.lang_sam_tracker import LangSAMTracker
 from lang_sam.utils import draw_image
 
+# ROS2関係のユーティリティ
+from lang_sam_wrapper.utils import TrackerParameterManager, ImagePublisher
+
 
 class LangSAMTrackerNode(Node):
     """ゼロショット物体検出・追跡・セグメンテーション統合ノード
@@ -32,70 +35,46 @@ class LangSAMTrackerNode(Node):
         super().__init__('lang_sam_tracker_node')
         
         # ROS2基盤設定
-        self.bridge = CvBridge()  # ROS Image ↔ OpenCV numpy変換
+        self.bridge = CvBridge()
+        self.image_publisher = ImagePublisher(self)
         self.last_gdino_time = 0.0
         self.gdino_processing = False
         self.lock = threading.Lock()
-        self.thread_pool = ThreadPoolExecutor(max_workers=1)  # GroundingDINO非同期処理用
+        self.thread_pool = ThreadPoolExecutor(max_workers=1)
         
-        # ROS2パラメータ設定
-        self._setup_parameters()
+        # パラメータ管理（簡素化）
+        param_manager = TrackerParameterManager(self)
+        params = param_manager.initialize_parameters()
+        self._load_parameters(params)
         
-        # CUDA環境設定（GPU利用最適化）
+        # CUDA環境設定
         self._setup_cuda_environment()
         
-        # LangSAMトラッカー初期化（SAM2 + GroundingDINO + CSRT統合）
+        # LangSAMトラッカー初期化
         self._initialize_tracker()
         
-        # ROS2通信設定（サブスクライバー・パブリッシャー）
+        # ROS2通信設定
         self._setup_communication()
         
         self.get_logger().info(f"LangSAMトラッカー初期化完了: {self.sam_model}")
     
-    def _setup_parameters(self):
-        """ROS2パラメータ宣言・読み込み"""
-        # AIモデル設定
-        self.declare_parameter('sam_model', 'sam2.1_hiera_small')
-        self.declare_parameter('text_prompt', 'white line. red pylon. human. car.')
-        self.declare_parameter('box_threshold', 0.3)
-        self.declare_parameter('text_threshold', 0.2)
-        self.declare_parameter('tracking_targets', ['white line', 'red pylon', 'human', 'car'])
-        
-        # 実行周波数設定
-        self.declare_parameter('gdino_interval_seconds', 1.0)
-        self.declare_parameter('enable_tracking', True)
-        self.declare_parameter('enable_sam', True)
-        
-        # ROS2トピック設定
-        self.declare_parameter('input_topic', '/zed/zed_node/rgb/image_rect_color')
-        self.declare_parameter('gdino_topic', '/image_gdino')
-        self.declare_parameter('csrt_topic', '/image_csrt')
-        self.declare_parameter('sam_topic', '/image_sam')
-        
-        # トラッキング設定
-        self.declare_parameter('bbox_margin', 5)
-        self.declare_parameter('bbox_min_size', 20)
-        self.declare_parameter('tracker_min_size', 10)
-        
-        # パラメータ値読み込み
-        self.sam_model = self.get_parameter('sam_model').value
-        self.text_prompt = self.get_parameter('text_prompt').value
-        self.box_threshold = self.get_parameter('box_threshold').value
-        self.text_threshold = self.get_parameter('text_threshold').value
-        self.tracking_targets = self.get_parameter('tracking_targets').value
-        
-        self.gdino_interval_seconds = self.get_parameter('gdino_interval_seconds').value
-        self.enable_tracking = self.get_parameter('enable_tracking').value
-        self.enable_sam = self.get_parameter('enable_sam').value
-        
-        self.input_topic = self.get_parameter('input_topic').value
-        self.gdino_topic = self.get_parameter('gdino_topic').value
-        self.csrt_topic = self.get_parameter('csrt_topic').value
-        self.sam_topic = self.get_parameter('sam_topic').value
-        
-        self.bbox_margin = self.get_parameter('bbox_margin').value
-        self.bbox_min_size = self.get_parameter('bbox_min_size').value
-        self.tracker_min_size = self.get_parameter('tracker_min_size').value
+    def _load_parameters(self, params: dict):
+        """パラメータ読み込み"""
+        self.sam_model = params['sam_model']
+        self.text_prompt = params['text_prompt']
+        self.box_threshold = params['box_threshold']
+        self.text_threshold = params['text_threshold']
+        self.tracking_targets = params['tracking_targets']
+        self.gdino_interval_seconds = params['gdino_interval_seconds']
+        self.enable_tracking = params['enable_tracking']
+        self.enable_sam = params['enable_sam']
+        self.input_topic = params['input_topic']
+        self.gdino_topic = params['gdino_topic']
+        self.csrt_topic = params['csrt_topic']
+        self.sam_topic = params['sam_topic']
+        self.bbox_margin = params['bbox_margin']
+        self.bbox_min_size = params['bbox_min_size']
+        self.tracker_min_size = params['tracker_min_size']
     
     def _setup_cuda_environment(self):
         """CUDA環境設定（GPU最適化）"""
@@ -263,25 +242,26 @@ class LangSAMTrackerNode(Node):
         except Exception:
             pass
     
-    def _convert_bgr_to_rgb_and_draw(self, image: np.ndarray, masks, boxes, labels, scores):
-        """BGR→RGB変換と描画の統一処理"""
-        height, width = image.shape[:2]
-        if len(masks) == 0:
-            dummy_masks = np.zeros((len(boxes), height, width), dtype=bool)
-        else:
-            dummy_masks = masks
+    def _draw_results(self, image: np.ndarray, masks, boxes, labels, scores):
+        """結果描画"""
+        if len(boxes) == 0:
+            return image
             
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # マスク処理（簡素化）
+        if len(masks) == 0:
+            height, width = image.shape[:2]
+            masks = np.zeros((len(boxes), height, width), dtype=bool)
         
-        result_image = draw_image(
+        # 一回の変換で描画実行
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        result_rgb = draw_image(
             image_rgb=image_rgb,
-            masks=dummy_masks,
+            masks=np.array(masks),
             xyxy=np.array(boxes),
             probs=np.array(scores),
             labels=labels
         )
-        
-        return cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR)
+        return cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
     
     def _publish_detection(self, image: np.ndarray, boxes, labels, scores, publisher):
         """GroundingDINO検出結果配信（BoundingBox + ラベル描画）"""
@@ -290,7 +270,7 @@ class LangSAMTrackerNode(Node):
                 publisher.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
                 return
             
-            result_bgr = self._convert_bgr_to_rgb_and_draw(image, [], boxes, labels, scores)
+            result_bgr = self._draw_results(image, [], boxes, labels, scores)
             publisher.publish(self.bridge.cv2_to_imgmsg(result_bgr, 'bgr8'))
             
         except Exception as e:
@@ -305,7 +285,7 @@ class LangSAMTrackerNode(Node):
                 return
             
             dummy_scores = np.ones(len(boxes))
-            result_bgr = self._convert_bgr_to_rgb_and_draw(image, [], boxes, labels, dummy_scores)
+            result_bgr = self._draw_results(image, [], boxes, labels, dummy_scores)
             publisher.publish(self.bridge.cv2_to_imgmsg(result_bgr, 'bgr8'))
             
         except Exception as e:
@@ -335,7 +315,7 @@ class LangSAMTrackerNode(Node):
             else:
                 masks_array = np.array([])
             
-            result_bgr = self._convert_bgr_to_rgb_and_draw(image, masks_array, boxes_array, labels, mask_scores)
+            result_bgr = self._draw_results(image, masks_array, boxes_array, labels, mask_scores)
             publisher.publish(self.bridge.cv2_to_imgmsg(result_bgr, 'bgr8'))
             
         except Exception as e:
