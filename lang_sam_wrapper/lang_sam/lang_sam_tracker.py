@@ -311,13 +311,18 @@ class TrackingManager:
                 updated_bbox = tracker.update(image)
                 
                 if updated_bbox is not None:
-                    # クリッピング処理
-                    clipped_bbox = self._clip_bbox_to_image(updated_bbox, width, height)
-                    
-                    if self._validate_clipped_bbox(clipped_bbox):
-                        self.tracked_boxes[tracker_id] = list(clipped_bbox)
-                    else:
+                    # 画角外判定（クリッピング前に実行）
+                    if self._is_bbox_outside_image(updated_bbox, width, height):
+                        # 完全に画角外に出た場合はトラッカー削除
                         failed_trackers.append(tracker_id)
+                    else:
+                        # 画角内または部分的に画角外の場合はクリッピング処理
+                        clipped_bbox = self._clip_bbox_to_image(updated_bbox, width, height)
+                        
+                        if self._validate_clipped_bbox(clipped_bbox):
+                            self.tracked_boxes[tracker_id] = list(clipped_bbox)
+                        else:
+                            failed_trackers.append(tracker_id)
                 else:
                     failed_trackers.append(tracker_id)
                     
@@ -346,6 +351,13 @@ class TrackingManager:
         width = x2 - x1
         height = y2 - y1
         return width > self.config.tracker_min_size and height > self.config.tracker_min_size
+    
+    def _is_bbox_outside_image(self, bbox: Tuple[int, int, int, int], 
+                              width: int, height: int) -> bool:
+        """バウンディングボックスが完全に画角外かどうか判定"""
+        x1, y1, x2, y2 = bbox
+        # 完全に画角外の条件: 左、右、上、下のいずれかに完全に出ている
+        return (x2 <= 0 or x1 >= width or y2 <= 0 or y1 >= height)
     
     def _remove_tracker(self, tracker_id: str) -> None:
         """トラッカー削除"""
