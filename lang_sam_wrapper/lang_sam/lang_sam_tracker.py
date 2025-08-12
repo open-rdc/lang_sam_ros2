@@ -297,6 +297,7 @@ class TrackingManager:
         height = y2 - y1
         return width >= self.config.bbox_min_size and height >= self.config.bbox_min_size
     
+    
     def update_all_trackers(self, image: np.ndarray) -> Dict[str, List[float]]:
         """全トラッカー更新"""
         if not self.trackers:

@@ -183,12 +183,13 @@ class LangSAMTrackerNode(Node):
                 labels = result.get('labels', [])
                 scores = result.get('scores', [])
                 
-                # CSRTトラッカー初期化（検出フレームで直接実行）
+                # CSRTトラッカー初期化（スレッドセーフ）
                 if hasattr(self.tracker, 'coordinator') and hasattr(self.tracker.coordinator, 'tracking_manager'):
                     tracking_manager = self.tracker.coordinator.tracking_manager
                     if tracking_manager:
-                        # 検出フレームでトラッカー直接初期化
-                        tracking_manager.initialize_trackers(boxes, labels, frame)
+                        # 複製防止のためロックしてトラッカー初期化
+                        with self.lock:
+                            tracking_manager.initialize_trackers(boxes, labels, frame)
                         self.get_logger().info(f"CSRTトラッカー初期化完了: {len(boxes)}オブジェクト")
                 
                 # 検出フレームでの結果配信（同期表示）
@@ -213,11 +214,12 @@ class LangSAMTrackerNode(Node):
                 self._publish_fallback_images(image)
                 return
             
-            # CSRT+SAM2統合実行
-            if self.enable_sam:
-                result = self.tracker.update_trackers_with_sam(image)
-            else:
-                result = self.tracker.update_trackers_only(image)
+            # CSRT+SAM2統合実行（複製防止のためロック）
+            with self.lock:
+                if self.enable_sam:
+                    result = self.tracker.update_trackers_with_sam(image)
+                else:
+                    result = self.tracker.update_trackers_only(image)
             
             if result is None:
                 self._publish_fallback_images(image)
