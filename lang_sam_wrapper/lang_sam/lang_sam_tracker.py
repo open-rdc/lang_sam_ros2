@@ -1,4 +1,4 @@
-"""統合Lang-SAM Trackerモジュール - 例外処理、トラッキング、フレームバッファリング機能を統合"""
+"""統合Lang-SAM Trackerモジュール - 例外処理、トラッキング機能を統合"""
 
 import time
 import cv2
@@ -15,9 +15,7 @@ if TYPE_CHECKING:
     from lang_sam.models.coordinator import ModelCoordinator
 
 
-# ========================================
-# 例外クラス群 (exceptions.py統合)
-# ========================================
+# 例外クラス群
 
 class LangSAMError(Exception):
     """LangSAM基底例外クラス"""
@@ -48,19 +46,6 @@ class TrackingError(LangSAMError):
     pass
 
 
-class ImageProcessingError(LangSAMError):
-    """画像処理関連エラー"""
-    pass
-
-
-class ConfigurationError(LangSAMError):
-    """設定・パラメータ関連エラー"""
-    pass
-
-
-class ROSError(LangSAMError):
-    """ROS通信関連エラー"""
-    pass
 
 
 # 具体的な例外クラス
@@ -92,23 +77,6 @@ class CSRTTrackingError(TrackingError):
         super().__init__(message, "CSRT_ERROR", original_error)
 
 
-class ImageConversionError(ImageProcessingError):
-    """画像変換エラー"""
-    
-    def __init__(self, conversion_type: str, shape: Optional[tuple] = None,
-                 original_error: Optional[Exception] = None):
-        message = f"画像変換エラー: {conversion_type}"
-        if shape:
-            message += f" (shape: {shape})"
-        super().__init__(message, "IMAGE_CONVERT", original_error)
-
-
-class ParameterValidationError(ConfigurationError):
-    """パラメータ検証エラー"""
-    
-    def __init__(self, param_name: str, expected_type: str, actual_value: Any):
-        message = f"パラメータ検証エラー: {param_name} (期待: {expected_type}, 実際: {type(actual_value).__name__})"
-        super().__init__(message, "PARAM_INVALID")
 
 
 # エラーハンドラーユーティリティ
@@ -133,13 +101,6 @@ class ErrorHandler:
         else:
             return TrackingError(f"トラッキングエラー [{tracker_id}]: {operation}", "TRACK_ERROR", error)
     
-    @staticmethod
-    def handle_image_error(operation: str, error: Exception, image_shape: Optional[tuple] = None) -> ImageProcessingError:
-        """画像処理エラーの統一ハンドリング"""
-        if "conversion" in str(error).lower() or "convert" in str(error).lower():
-            return ImageConversionError(operation, image_shape, error)
-        else:
-            return ImageProcessingError(f"画像処理エラー: {operation}", "IMAGE_ERROR", error)
     
     @staticmethod
     def safe_execute(operation: str, func, *args, **kwargs):
@@ -154,9 +115,7 @@ class ErrorHandler:
             raise LangSAMError(f"処理エラー: {operation}", "GENERAL_ERROR", e)
 
 
-# ========================================
-# トラッキング機能群 (tracking.py統合)
-# ========================================
+# トラッキング機能群
 
 class TrackingConfig:
     """トラッキング設定管理"""
@@ -273,7 +232,7 @@ class TrackingManager:
                 if bbox is None:
                     continue
                 
-                # トラッカー生成
+                # トラッカー生成（内部IDは一意性確保のため番号付き）
                 tracker_id = f"{label}_{i}"
                 try:
                     tracker = CSRTTracker(tracker_id, bbox, image)
@@ -398,7 +357,7 @@ class TrackingManager:
         self.tracked_boxes.clear()
     
     def get_tracking_result(self) -> Dict[str, Any]:
-        """追跡結果取得"""
+        """追跡結果取得（ラベル名から番号部分を除去）"""
         if not self.tracked_boxes:
             return {
                 "boxes": np.array([]),
@@ -407,7 +366,16 @@ class TrackingManager:
             }
         
         boxes = list(self.tracked_boxes.values())
-        labels = list(self.tracked_boxes.keys())
+        # tracker_idから番号部分を除去して元のラベルを復元
+        labels = []
+        for tracker_id in self.tracked_boxes.keys():
+            # "white line_2" -> "white line" に変換
+            if '_' in tracker_id and tracker_id.split('_')[-1].isdigit():
+                label = '_'.join(tracker_id.split('_')[:-1])  # 最後の_以降を削除
+            else:
+                label = tracker_id
+            labels.append(label)
+        
         scores = np.ones(len(boxes))
         
         return {
@@ -421,12 +389,12 @@ class TrackingManager:
         return len(self.trackers) > 0
 
 
-# ========================================
-# フレームバッファリング機能群 (frame_buffer.py統合)
-# ========================================
 
-class FrameBuffer:
-    """GroundingDINO処理中のフレーム蓄積と高速キャッチアップ"""
+
+# CSRT専用フレームバッファリング機能群
+
+class CSRTFrameBuffer:
+    """CSRT専用フレームバッファ - 画像保存、時間さかのぼり、早送り機能"""
     
     def __init__(self, max_buffer_seconds: float = 5.0):
         """
@@ -436,10 +404,6 @@ class FrameBuffer:
         self.max_buffer_seconds = max_buffer_seconds
         self.max_frames = int(max_buffer_seconds * 30)  # 30fps想定
         
-        # バッファ状態管理
-        self.is_buffering = False
-        self.gdino_start_time = 0.0
-        
         # フレームバッファ（時系列順）
         self.frames = deque(maxlen=self.max_frames)
         self.timestamps = deque(maxlen=self.max_frames)
@@ -448,19 +412,8 @@ class FrameBuffer:
         self.total_buffered_frames = 0
         self.last_catchup_duration = 0.0
     
-    def start_gdino_processing(self) -> None:
-        """GroundingDINO処理開始 - バッファリング開始"""
-        self.is_buffering = True
-        self.gdino_start_time = time.time()
-        self.frames.clear()
-        self.timestamps.clear()
-        self.total_buffered_frames = 0
-    
     def add_frame(self, frame: np.ndarray) -> None:
-        """フレーム追加（バッファリング中のみ）"""
-        if not self.is_buffering:
-            return
-        
+        """フレーム追加（常時蓄積）"""
         current_time = time.time()
         
         # フレームをコピーして蓄積（参照渡しを避ける）
@@ -468,76 +421,21 @@ class FrameBuffer:
         self.timestamps.append(current_time)
         self.total_buffered_frames += 1
     
-    def finish_gdino_and_catchup(self, detection_result: Dict[str, Any], 
-                                current_tracker_manager) -> Dict[str, Any]:
-        """GroundingDINO完了 - 高速キャッチアップ実行
-        
-        Args:
-            detection_result: GroundingDINOの検出結果
-            current_tracker_manager: トラッキングマネージャー
-            
-        Returns:
-            最新フレームでの追跡結果
-        """
-        if not self.is_buffering:
-            return detection_result
-        
-        self.is_buffering = False
-        catchup_start = time.time()
-        
-        try:
-            # バッファされたフレームがない場合は通常処理
-            if len(self.frames) == 0:
-                return detection_result
-            
-            # 検出結果でトラッカー初期化（最初のバッファフレーム）
-            first_frame = self.frames[0]
-            boxes = detection_result.get("boxes", [])
-            labels = detection_result.get("labels", [])
-            
-            if len(boxes) == 0:
-                return detection_result
-            
-            # トラッカー初期化
-            current_tracker_manager.initialize_trackers(boxes, labels, first_frame)
-            
-            # 蓄積フレームで高速追跡実行
-            final_result = self._fast_forward_tracking(current_tracker_manager)
-            
-            # 統計更新
-            self.last_catchup_duration = time.time() - catchup_start
-            
-            return final_result
-            
-        except Exception as e:
-            # エラー時は元の結果を返却
-            return detection_result
-    
-    def _fast_forward_tracking(self, tracker_manager) -> Dict[str, Any]:
-        """蓄積フレームでの高速追跡実行"""
-        if len(self.frames) <= 1:
+    def fast_forward_tracking(self, tracker_manager, start_frame_idx: int = 0) -> Dict[str, Any]:
+        """蓄積フレームでの高速追跡実行（早送り機能）"""
+        if len(self.frames) <= start_frame_idx + 1:
             return tracker_manager.get_tracking_result()
         
-        # 2フレーム目以降で高速追跡
-        for i in range(1, len(self.frames)):
+        # 指定フレーム以降で高速追跡
+        for i in range(start_frame_idx + 1, len(self.frames)):
             frame = self.frames[i]
             tracker_manager.update_all_trackers(frame)
         
         # 最終追跡結果返却
         return tracker_manager.get_tracking_result()
     
-    def get_buffer_stats(self) -> Dict[str, Any]:
-        """バッファ統計情報取得"""
-        return {
-            "is_buffering": self.is_buffering,
-            "buffered_frames": len(self.frames),
-            "total_buffered": self.total_buffered_frames,
-            "last_catchup_duration": self.last_catchup_duration,
-            "buffer_timespan": self.timestamps[-1] - self.timestamps[0] if len(self.timestamps) >= 2 else 0.0
-        }
-    
     def get_frame_at_time_offset(self, seconds_ago: float) -> Optional[Tuple[np.ndarray, float]]:
-        """指定時間前のフレーム取得（時間さかのぼり）
+        """指定時間前のフレーム取得（時間さかのぼり機能）
         
         Args:
             seconds_ago: 何秒前のフレームを取得するか
@@ -593,38 +491,65 @@ class FrameBuffer:
         sequence.sort(key=lambda x: x[1])
         return sequence
     
+    def get_latest_frames(self, count: int = 5) -> List[Tuple[np.ndarray, float]]:
+        """最新N個のフレーム取得"""
+        if len(self.frames) == 0:
+            return []
+        
+        start_idx = max(0, len(self.frames) - count)
+        result = []
+        for i in range(start_idx, len(self.frames)):
+            result.append((self.frames[i].copy(), self.timestamps[i]))
+        
+        return result
+    
     def clear_buffer(self) -> None:
         """バッファクリア"""
-        self.is_buffering = False
         self.frames.clear()
         self.timestamps.clear()
         self.total_buffered_frames = 0
+    
+    def get_buffer_stats(self) -> Dict[str, Any]:
+        """バッファ統計情報取得"""
+        return {
+            "buffered_frames": len(self.frames),
+            "total_buffered": self.total_buffered_frames,
+            "last_catchup_duration": self.last_catchup_duration,
+            "buffer_timespan": self.timestamps[-1] - self.timestamps[0] if len(self.timestamps) >= 2 else 0.0
+        }
 
 
-class RealtimeFrameManager:
-    """リアルタイムフレーム管理とバッファリング統合"""
+class CSRTFrameManager:
+    """CSRT専用フレーム管理 - 画像保存、時間操作、キャッチアップ機能統合"""
     
     def __init__(self, buffer_duration: float = 5.0):
-        self.frame_buffer = FrameBuffer(buffer_duration)
+        self.frame_buffer = CSRTFrameBuffer(buffer_duration)
         self.latest_frame = None
         self.frame_count = 0
     
     def process_incoming_frame(self, frame: np.ndarray) -> None:
-        """受信フレーム処理"""
+        """受信フレーム処理（常時蓄積）"""
         self.latest_frame = frame
         self.frame_count += 1
         
-        # バッファリング中の場合は蓄積
+        # 全フレームを蓄積（CSRT用）
         self.frame_buffer.add_frame(frame)
     
-    def start_gdino_processing(self) -> None:
-        """GroundingDINO処理開始通知"""
-        self.frame_buffer.start_gdino_processing()
+    def fast_forward_csrt_tracking(self, tracker_manager, frames_to_skip: int = 0) -> Dict[str, Any]:
+        """CSRT高速キャッチアップ（早送り機能）"""
+        return self.frame_buffer.fast_forward_tracking(tracker_manager, frames_to_skip)
     
-    def complete_gdino_processing(self, detection_result: Dict[str, Any], 
-                                 tracker_manager) -> Dict[str, Any]:
-        """GroundingDINO処理完了とキャッチアップ"""
-        return self.frame_buffer.finish_gdino_and_catchup(detection_result, tracker_manager)
+    def get_past_frame(self, seconds_ago: float) -> Optional[Tuple[np.ndarray, float]]:
+        """過去フレーム取得（時間さかのぼり）"""
+        return self.frame_buffer.get_frame_at_time_offset(seconds_ago)
+    
+    def get_frame_history(self, duration_seconds: float) -> List[Tuple[np.ndarray, float]]:
+        """指定期間のフレーム履歴取得"""
+        return self.frame_buffer.get_frame_sequence(duration_seconds, 0.0)
+    
+    def get_recent_frames(self, count: int = 5) -> List[Tuple[np.ndarray, float]]:
+        """最新N個のフレーム取得"""
+        return self.frame_buffer.get_latest_frames(count)
     
     def get_latest_frame(self) -> Optional[np.ndarray]:
         """最新フレーム取得"""
@@ -639,30 +564,17 @@ class RealtimeFrameManager:
             "latest_frame_available": self.latest_frame is not None
         }
     
-    def get_past_frame(self, seconds_ago: float) -> Optional[Tuple[np.ndarray, float]]:
-        """過去フレーム取得（時間さかのぼり）"""
-        return self.frame_buffer.get_frame_at_time_offset(seconds_ago)
-    
-    def get_frame_history(self, duration_seconds: float) -> List[Tuple[np.ndarray, float]]:
-        """指定期間のフレーム履歴取得"""
-        return self.frame_buffer.get_frame_sequence(duration_seconds, 0.0)
+    def clear_history(self) -> None:
+        """履歴クリア"""
+        self.frame_buffer.clear_buffer()
 
 
-# ========================================
 # メインLangSAMTrackerクラス
-# ========================================
 
 class LangSAMTracker:
-    """Language Segment-Anything + CSRT統合トラッカー    
-    責任:
-    - 高レベルなAPI提供
-    - モデルコーディネーターへの委譲
-    - 設定管理
+    """Language Segment-Anything + CSRT統合トラッカー
     
-    複雑な実装詳細は各専門クラスに委譲:
-    - ModelCoordinator: モデル統合・パイプライン実行
-    - TrackingManager: CSRT追跡管理
-    - SafeImageProcessor: 画像処理・検証
+    高レベルAPIを提供し、ModelCoordinatorとTrackingManagerに委譲して処理を実行
     """
     
     def __init__(self, sam_type: str = "sam2.1_hiera_small", 
@@ -698,10 +610,7 @@ class LangSAMTracker:
         update_trackers: bool = True,
         run_sam: bool = True
     ) -> List[Dict]:
-        """統合推論パイプライン（GroundingDINO → CSRT → SAM2）
-        
-        複雑な実装詳細はModelCoordinatorに委譲
-        """
+        """統合推論パイプライン（GroundingDINO → CSRT → SAM2）"""
         try:
             return self.coordinator.predict_full_pipeline(
                 images_pil, texts_prompt, box_threshold, text_threshold,
@@ -715,10 +624,7 @@ class LangSAMTracker:
             raise ErrorHandler.handle_model_error("full_pipeline", e)
     
     def update_trackers_only(self, image_np: np.ndarray) -> Dict:
-        """CSRT追跡のみ実行（高速版）
-        
-        トラッキング詳細はTrackingManagerに委譲
-        """
+        """CSRT追跡のみ実行（高速版）"""
         try:
             return self.coordinator.update_tracking_only(image_np)
         except LangSAMError:
@@ -727,10 +633,7 @@ class LangSAMTracker:
             raise ErrorHandler.handle_tracking_error("batch", "update_only", e)
     
     def update_trackers_with_sam(self, image_np: np.ndarray) -> Dict:
-        """CSRT追跡 + SAM2セグメンテーション統合実行
-        
-        複雑な統合ロジックはModelCoordinatorに委譲
-        """
+        """CSRT追跡 + SAM2セグメンテーション統合実行"""
         try:
             return self.coordinator.update_tracking_with_sam(image_np)
         except LangSAMError:
@@ -739,29 +642,20 @@ class LangSAMTracker:
             raise ErrorHandler.handle_model_error("tracking_with_sam", e)
     
     def set_tracking_targets(self, targets: List[str]) -> None:
-        """追跡対象ラベル設定
-        
-        設定管理はTrackingManagerに委譲
-        """
+        """追跡対象ラベル設定"""
         if self.coordinator.tracking_manager:
             self.coordinator.tracking_manager.set_tracking_targets(targets)
     
     def set_tracking_config(self, config: Dict[str, int]) -> None:
-        """トラッキング設定更新
-        
-        設定管理はTrackingConfigに委譲
-        """
+        """トラッキング設定更新"""
         if self.coordinator.tracking_manager:
             self.coordinator.tracking_config.update(**config)
     
     def clear_trackers(self) -> None:
-        """全トラッカー状態クリア
-        
-        状態管理はModelCoordinatorに委譲
-        """
+        """全トラッカー状態クリア"""
         self.coordinator.clear_tracking_state()
     
-    # 互換性維持のためのプロパティ
+    # プロパティ
     @property
     def has_active_tracking(self) -> bool:
         """アクティブ追跡状態確認"""
