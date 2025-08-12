@@ -7,8 +7,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from lang_sam.models.gdino import GDINO
 from lang_sam.models.sam import SAM
 from lang_sam.models.utils import DEVICE
-from lang_sam.tracking import TrackingManager, TrackingConfig
-from lang_sam.exceptions import ModelError, SAM2InitError, GroundingDINOError, ErrorHandler
+from lang_sam.lang_sam_tracker import TrackingManager, TrackingConfig, ModelError, SAM2InitError, GroundingDINOError, ErrorHandler
 
 
 class ModelCoordinator:

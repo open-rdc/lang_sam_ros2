@@ -17,7 +17,8 @@ from PIL import Image as PILImage
 # LangSAM統合トラッカー（GroundingDINO + CSRT + SAM2）
 from lang_sam.lang_sam_tracker import LangSAMTracker
 from lang_sam.utils import draw_image
-from lang_sam.frame_buffer import RealtimeFrameManager
+# FrameBufferはCSRT用機能のため、GroundingDINOでは使用しない
+# from lang_sam.lang_sam_tracker import RealtimeFrameManager
 
 # ROS2関係のユーティリティ
 from lang_sam_wrapper.utils import TrackerParameterManager, ImagePublisher
@@ -43,8 +44,8 @@ class LangSAMTrackerNode(Node):
         self.lock = threading.Lock()
         self.thread_pool = ThreadPoolExecutor(max_workers=1)
         
-        # フレームバッファシステム（遅延補正用）
-        self.frame_manager = RealtimeFrameManager(buffer_duration=5.0)
+        # FrameBufferは削除（GroundingDINOでは不要）
+        # self.frame_manager = RealtimeFrameManager(buffer_duration=5.0)
         
         # パラメータ管理（簡素化）
         param_manager = TrackerParameterManager(self)
@@ -124,8 +125,8 @@ class LangSAMTrackerNode(Node):
             image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             current_time = time.time()
             
-            # フレームマネージャーに最新フレーム登録
-            self.frame_manager.process_incoming_frame(image)
+            # FrameBufferのフレーム登録を削除（不要）
+            # self.frame_manager.process_incoming_frame(image)
             
             # GroundingDINO実行判定（時間ベース・非同期）
             with self.lock:
@@ -140,10 +141,7 @@ class LangSAMTrackerNode(Node):
                     self.gdino_processing = True
                     self.last_gdino_time = current_time
                 
-                # フレームバッファリング開始
-                self.frame_manager.start_gdino_processing()
-                
-                # GroundingDINO処理開始（最新フレーム使用）
+                # GroundingDINO処理開始（最新フレームで直接実行）
                 self.thread_pool.submit(self._async_gdino_processing, image.copy())
             
             # CSRT+SAM2同期実行（30Hz、毎フレーム）
@@ -185,33 +183,19 @@ class LangSAMTrackerNode(Node):
                 labels = result.get('labels', [])
                 scores = result.get('scores', [])
                 
-                # フレームバッファシステムで高速キャッチアップ実行
+                # CSRTトラッカー初期化（検出フレームで直接実行）
                 if hasattr(self.tracker, 'coordinator') and hasattr(self.tracker.coordinator, 'tracking_manager'):
                     tracking_manager = self.tracker.coordinator.tracking_manager
                     if tracking_manager:
-                        # キャッチアップ実行（最新フレームまで高速追跡）
-                        updated_result = self.frame_manager.complete_gdino_processing(result, tracking_manager)
-                        boxes = updated_result.get('boxes', [])
-                        labels = updated_result.get('labels', [])
-                        scores = updated_result.get('scores', [])
-                        
-                        # 統計情報をログ出力
-                        stats = self.frame_manager.get_stats()
-                        if stats['total_buffered'] > 0:
-                            self.get_logger().info(
-                                f"キャッチアップ完了: {stats['total_buffered']}フレーム "
-                                f"({stats['last_catchup_duration']:.3f}秒)"
-                            )
+                        # 検出フレームでトラッカー直接初期化
+                        tracking_manager.initialize_trackers(boxes, labels, frame)
+                        self.get_logger().info(f"CSRTトラッカー初期化完了: {len(boxes)}オブジェクト")
                 
-                # 最新フレームでの検出結果配信
-                latest_frame = self.frame_manager.get_latest_frame()
-                display_frame = latest_frame if latest_frame is not None else frame
-                self._publish_detection(display_frame, boxes, labels, scores, self.gdino_pub)
+                # 検出フレームでの結果配信（同期表示）
+                self._publish_detection(frame, boxes, labels, scores, self.gdino_pub)
             else:
-                # 検出なし時は最新フレーム配信
-                latest_frame = self.frame_manager.get_latest_frame()
-                display_frame = latest_frame if latest_frame is not None else frame
-                self.gdino_pub.publish(self.bridge.cv2_to_imgmsg(display_frame, 'bgr8'))
+                # 検出なし時は元フレーム配信
+                self.gdino_pub.publish(self.bridge.cv2_to_imgmsg(frame, 'bgr8'))
                 
         except Exception as e:
             self.get_logger().error(f"GroundingDINOエラー: {e}")
