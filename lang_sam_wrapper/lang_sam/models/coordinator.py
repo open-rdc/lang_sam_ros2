@@ -45,12 +45,13 @@ class ModelCoordinator:
             raise GroundingDINOError("initialization", e)
     
     def setup_tracking(self, tracking_targets: List[str], 
-                      tracking_config: Optional[Dict[str, int]] = None) -> None:
-        """トラッキング設定"""
+                      tracking_config: Optional[Dict[str, int]] = None,
+                      csrt_params: Optional[Dict] = None) -> None:
+        """トラッキング設定（CSRTパラメータ対応）"""
         if tracking_config:
             self.tracking_config.update(**tracking_config)
         
-        self.tracking_manager = TrackingManager(tracking_targets, self.tracking_config)
+        self.tracking_manager = TrackingManager(tracking_targets, self.tracking_config, csrt_params)
     
     def predict_full_pipeline(
         self,

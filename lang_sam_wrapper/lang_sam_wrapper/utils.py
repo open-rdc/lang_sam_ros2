@@ -74,8 +74,6 @@ class TrackerParameterManager(ParameterManager):
             
             # 実行周波数設定
             'gdino_interval_seconds': {'default': 1.0, 'description': 'GroundingDINO実行間隔'},
-            'enable_tracking': {'default': True, 'description': 'CSRTトラッキング有効化'},
-            'enable_sam': {'default': True, 'description': 'SAM2セグメンテーション有効化'},
             
             # ROS2トピック設定
             'input_topic': {'default': '/zed/zed_node/rgb/image_rect_color', 'description': '入力画像トピック'},
@@ -87,6 +85,39 @@ class TrackerParameterManager(ParameterManager):
             'bbox_margin': {'default': 5, 'description': 'BoundingBox境界マージン'},
             'bbox_min_size': {'default': 20, 'description': '最小BoundingBoxサイズ'},
             'tracker_min_size': {'default': 10, 'description': 'トラッカー継続最小サイズ'},
+            
+            # CSRTフレーム機能設定
+            'enable_csrt_recovery': {'default': True, 'description': 'CSRT復旧機能統合有効化（バッファ・時間遡行・早送り）'},
+            'frame_buffer_duration': {'default': 5.0, 'description': 'フレームバッファ保持時間（秒）'},
+            'time_travel_seconds': {'default': 1.0, 'description': 'さかのぼり時間（秒）'},
+            'fast_forward_frames': {'default': 10, 'description': '早送り処理フレーム数（計算負荷制御）'},
+            'recovery_attempt_frames': {'default': 5, 'description': '復旧処理で使用する最新フレーム数（ノイズ回避）'},
+            
+            # CSRTトラッカー内部パラメータ
+            'csrt_use_hog': {'default': True, 'description': 'HOG特徴量使用'},
+            'csrt_use_color_names': {'default': False, 'description': '色名特徴量使用'},
+            'csrt_use_gray': {'default': True, 'description': 'グレースケール特徴量使用'},
+            'csrt_use_rgb': {'default': False, 'description': 'RGB特徴量使用'},
+            'csrt_use_channel_weights': {'default': False, 'description': 'チャンネル重み使用'},
+            'csrt_use_segmentation': {'default': True, 'description': 'セグメンテーション使用'},
+            'csrt_window_function': {'default': 'hann', 'description': '窓関数タイプ'},
+            'csrt_kaiser_alpha': {'default': 3.75, 'description': 'Kaiser窓のアルファパラメータ'},
+            'csrt_cheb_attenuation': {'default': 45.0, 'description': 'Chebyshev窓の減衰量'},
+            'csrt_template_size': {'default': 200.0, 'description': 'テンプレートサイズ'},
+            'csrt_gsl_sigma': {'default': 1.0, 'description': 'ガウシアン形状パラメータ'},
+            'csrt_hog_orientations': {'default': 9, 'description': 'HOG方向量子化数'},
+            'csrt_hog_clip': {'default': 0.2, 'description': 'HOGクリッピング閾値'},
+            'csrt_padding': {'default': 3.0, 'description': '探索領域パディング倍率'},
+            'csrt_filter_lr': {'default': 0.02, 'description': 'フィルター学習率'},
+            'csrt_weights_lr': {'default': 0.02, 'description': '重み学習率'},
+            'csrt_num_hog_channels_used': {'default': -1, 'description': '使用HOGチャンネル数'},
+            'csrt_admm_iterations': {'default': 4, 'description': 'ADMM最適化反復数'},
+            'csrt_histogram_bins': {'default': 16, 'description': 'ヒストグラム量子化数'},
+            'csrt_histogram_lr': {'default': 0.04, 'description': 'ヒストグラム学習率'},
+            'csrt_background_ratio': {'default': 2, 'description': '背景領域比率'},
+            'csrt_number_of_scales': {'default': 33, 'description': 'スケール探索数'},
+            'csrt_scale_sigma_factor': {'default': 0.25, 'description': 'スケールσ係数'},
+            'csrt_scale_model_max_area': {'default': 512.0, 'description': 'スケールモデル最大面積'},
         }
 
 

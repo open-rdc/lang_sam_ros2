@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Union, Tuple, Any
 
 from lang_sam.models.utils import DEVICE
 
-# 前方宣言で循環インポートを回避
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from lang_sam.models.coordinator import ModelCoordinator
@@ -46,8 +45,6 @@ class TrackingError(LangSAMError):
     pass
 
 
-
-
 # 具体的な例外クラス
 class SAM2InitError(ModelError):
     """SAM2初期化エラー"""
@@ -75,8 +72,6 @@ class CSRTTrackingError(TrackingError):
                  original_error: Optional[Exception] = None):
         message = f"CSRTトラッキングエラー [{tracker_id}]: {operation}"
         super().__init__(message, "CSRT_ERROR", original_error)
-
-
 
 
 # エラーハンドラーユーティリティ
@@ -134,11 +129,12 @@ class TrackingConfig:
 
 
 class CSRTTracker:
-    """単一オブジェクト用CSRTトラッカー"""
+    """単一オブジェクト用CSRTトラッカー（パラメータ化対応）"""
     
     def __init__(self, tracker_id: str, bbox: Tuple[int, int, int, int], 
-                 image: np.ndarray):
+                 image: np.ndarray, csrt_params: Optional[Dict] = None):
         self.tracker_id = tracker_id
+        self.csrt_params = csrt_params or {}
         self.tracker = self._create_tracker()
         self.is_initialized = False
         
@@ -146,14 +142,74 @@ class CSRTTracker:
             self.is_initialized = True
     
     def _create_tracker(self) -> Optional[cv2.Tracker]:
-        """OpenCV CSRTトラッカー生成（バージョン対応）"""
+        """OpenCV CSRTトラッカー生成（パラメータ設定付き）"""
         try:
-            if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
-                return cv2.legacy.TrackerCSRT_create()
-            else:
-                return cv2.TrackerCSRT_create()
+            tracker = self._create_opencv_tracker()
+            self._apply_csrt_params(tracker)
+            return tracker
         except Exception as e:
             raise CSRTTrackingError(self.tracker_id, "tracker creation", e)
+    
+    def _create_opencv_tracker(self) -> cv2.Tracker:
+        """OpenCVバージョン対応のCSRTトラッカー生成"""
+        if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+            return cv2.legacy.TrackerCSRT_create()
+        return cv2.TrackerCSRT_create()
+    
+    def _apply_csrt_params(self, tracker: cv2.Tracker) -> None:
+        """CSRTパラメータをトラッカーに適用"""
+        if tracker and self.csrt_params and hasattr(tracker, 'setParams'):
+            params = self._build_csrt_params()
+            if params:
+                tracker.setParams(params)
+    
+    def _build_csrt_params(self) -> Any:
+        """CSRTパラメータ構築"""
+        try:
+            params = self._create_opencv_params()
+            if not params:
+                return None
+            
+            self._set_csrt_parameters(params)
+            return params
+        except Exception:
+            return None
+    
+    def _create_opencv_params(self) -> Any:
+        """OpenCVパラメータ構造体作成"""
+        if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_Params'):
+            return cv2.legacy.TrackerCSRT_Params()
+        elif hasattr(cv2, 'TrackerCSRT_Params'):
+            return cv2.TrackerCSRT_Params()
+        return None
+    
+    def _set_csrt_parameters(self, params: Any) -> None:
+        """CSRTパラメータ値設定"""
+        param_mapping = self._get_param_mapping()
+        
+        for param_key, param_value in self.csrt_params.items():
+            if param_key.startswith('csrt_'):
+                clean_key = param_key[5:]
+                opencv_attr = param_mapping.get(clean_key)
+                if opencv_attr and hasattr(params, opencv_attr):
+                    setattr(params, opencv_attr, param_value)
+    
+    def _get_param_mapping(self) -> Dict[str, str]:
+        """CSRTパラメータマッピング取得"""
+        return {
+            'use_hog': 'useHog', 'use_color_names': 'useColorNames', 
+            'use_gray': 'useGray', 'use_rgb': 'useRGB',
+            'use_channel_weights': 'useChannelWeights', 'use_segmentation': 'useSegmentation',
+            'window_function': 'windowFunction', 'kaiser_alpha': 'kaiserAlpha',
+            'cheb_attenuation': 'chebAttenuation', 'template_size': 'templateSize',
+            'gsl_sigma': 'gslSigma', 'hog_orientations': 'hogOrientations',
+            'hog_clip': 'hogClip', 'padding': 'padding',
+            'filter_lr': 'filterLR', 'weights_lr': 'weightsLR',
+            'num_hog_channels_used': 'numHogChannelsUsed', 'admm_iterations': 'admmIterations',
+            'histogram_bins': 'histogramBins', 'histogram_lr': 'histogramLR',
+            'background_ratio': 'backgroundRatio', 'number_of_scales': 'numberOfScales',
+            'scale_sigma_factor': 'scaleSigmaFactor', 'scale_model_max_area': 'scaleModelMaxArea'
+        }
     
     def _initialize(self, image: np.ndarray, bbox: Tuple[int, int, int, int]) -> bool:
         """トラッカー初期化"""
@@ -198,11 +254,13 @@ class CSRTTracker:
 
 
 class TrackingManager:
-    """複数オブジェクトCSRTトラッキング管理"""
+    """複数オブジェクトCSRTトラッキング管理（パラメータ化対応）"""
     
-    def __init__(self, tracking_targets: List[str], config: Optional[TrackingConfig] = None):
+    def __init__(self, tracking_targets: List[str], config: Optional[TrackingConfig] = None,
+                 csrt_params: Optional[Dict] = None):
         self.tracking_targets = [target.lower() for target in tracking_targets]
         self.config = config or TrackingConfig()
+        self.csrt_params = csrt_params or {}
         self.trackers: Dict[str, CSRTTracker] = {}
         self.tracked_boxes: Dict[str, List[float]] = {}
     
@@ -232,10 +290,10 @@ class TrackingManager:
                 if bbox is None:
                     continue
                 
-                # トラッカー生成（内部IDは一意性確保のため番号付き）
+                # トラッカー生成（内部IDは一意性確保のため番号付き、CSRTパラメータ付き）
                 tracker_id = f"{label}_{i}"
                 try:
-                    tracker = CSRTTracker(tracker_id, bbox, image)
+                    tracker = CSRTTracker(tracker_id, bbox, image, self.csrt_params)
                     if tracker.is_initialized:
                         self.trackers[tracker_id] = tracker
                         self.tracked_boxes[tracker_id] = list(bbox)
@@ -307,33 +365,37 @@ class TrackingManager:
         failed_trackers = []
         
         for tracker_id, tracker in list(self.trackers.items()):
-            try:
-                updated_bbox = tracker.update(image)
-                
-                if updated_bbox is not None:
-                    # 画角外判定（クリッピング前に実行）
-                    if self._is_bbox_outside_image(updated_bbox, width, height):
-                        # 完全に画角外に出た場合はトラッカー削除
-                        failed_trackers.append(tracker_id)
-                    else:
-                        # 画角内または部分的に画角外の場合はクリッピング処理
-                        clipped_bbox = self._clip_bbox_to_image(updated_bbox, width, height)
-                        
-                        if self._validate_clipped_bbox(clipped_bbox):
-                            self.tracked_boxes[tracker_id] = list(clipped_bbox)
-                        else:
-                            failed_trackers.append(tracker_id)
-                else:
-                    failed_trackers.append(tracker_id)
-                    
-            except CSRTTrackingError:
+            if not self._update_single_tracker(tracker_id, tracker, image, width, height):
                 failed_trackers.append(tracker_id)
         
-        # 失敗トラッカー削除
+        self._remove_failed_trackers(failed_trackers)
+        return self.tracked_boxes.copy()
+    
+    def _update_single_tracker(self, tracker_id: str, tracker: CSRTTracker, 
+                              image: np.ndarray, width: int, height: int) -> bool:
+        """単一トラッカー更新処理"""
+        try:
+            updated_bbox = tracker.update(image)
+            if updated_bbox is None:
+                return False
+            
+            if self._is_bbox_outside_image(updated_bbox, width, height):
+                return False
+            
+            clipped_bbox = self._clip_bbox_to_image(updated_bbox, width, height)
+            if not self._validate_clipped_bbox(clipped_bbox):
+                return False
+            
+            self.tracked_boxes[tracker_id] = list(clipped_bbox)
+            return True
+            
+        except CSRTTrackingError:
+            return False
+    
+    def _remove_failed_trackers(self, failed_trackers: List[str]) -> None:
+        """失敗したトラッカー削除"""
         for tracker_id in failed_trackers:
             self._remove_tracker(tracker_id)
-        
-        return self.tracked_boxes.copy()
     
     def _clip_bbox_to_image(self, bbox: Tuple[int, int, int, int], 
                            width: int, height: int) -> Tuple[int, int, int, int]:
@@ -663,6 +725,19 @@ class LangSAMTracker:
         """トラッキング設定更新"""
         if self.coordinator.tracking_manager:
             self.coordinator.tracking_config.update(**config)
+    
+    def set_csrt_params(self, csrt_params: Dict) -> None:
+        """CSRTパラメータ設定"""
+        if self.coordinator.tracking_manager:
+            self.coordinator.tracking_manager.csrt_params = csrt_params
+        else:
+            # トラッキングマネージャーが未初期化の場合は再作成
+            default_config = {
+                'bbox_margin': 5,
+                'bbox_min_size': 20,
+                'tracker_min_size': 10
+            }
+            self.coordinator.setup_tracking(self._default_tracking_targets, default_config, csrt_params)
     
     def clear_trackers(self) -> None:
         """全トラッカー状態クリア"""

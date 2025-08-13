@@ -7,18 +7,18 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 import torch
-import os
 import warnings
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, Optional
 from PIL import Image as PILImage
 
 # LangSAM統合トラッカー（GroundingDINO + CSRT + SAM2）
 from lang_sam.lang_sam_tracker import LangSAMTracker
 from lang_sam.utils import draw_image
-# FrameBufferはCSRT用機能のため、GroundingDINOでは使用しない
-# from lang_sam.lang_sam_tracker import RealtimeFrameManager
+# CSRTフレーム機能をインポート（画像保存・時間さかのぼり・早送り）
+from lang_sam.lang_sam_tracker import CSRTFrameManager
 
 # ROS2関係のユーティリティ
 from lang_sam_wrapper.utils import TrackerParameterManager, ImagePublisher
@@ -44,8 +44,9 @@ class LangSAMTrackerNode(Node):
         self.lock = threading.Lock()
         self.thread_pool = ThreadPoolExecutor(max_workers=1)
         
-        # FrameBufferは削除（GroundingDINOでは不要）
-        # self.frame_manager = RealtimeFrameManager(buffer_duration=5.0)
+        # CSRTフレームマネージャー初期化（パラメータ化対応）
+        # フレームバッファリングが有効な場合のみ初期化
+        self.csrt_frame_manager = None
         
         # パラメータ管理（簡素化）
         param_manager = TrackerParameterManager(self)
@@ -57,6 +58,9 @@ class LangSAMTrackerNode(Node):
         
         # LangSAMトラッカー初期化
         self._initialize_tracker()
+        
+        # CSRTフレーム機能初期化（パラメータに基づく）
+        self._initialize_csrt_features()
         
         # ROS2通信設定
         self._setup_communication()
@@ -71,8 +75,6 @@ class LangSAMTrackerNode(Node):
         self.text_threshold = params['text_threshold']
         self.tracking_targets = params['tracking_targets']
         self.gdino_interval_seconds = params['gdino_interval_seconds']
-        self.enable_tracking = params['enable_tracking']
-        self.enable_sam = params['enable_sam']
         self.input_topic = params['input_topic']
         self.gdino_topic = params['gdino_topic']
         self.csrt_topic = params['csrt_topic']
@@ -80,6 +82,16 @@ class LangSAMTrackerNode(Node):
         self.bbox_margin = params['bbox_margin']
         self.bbox_min_size = params['bbox_min_size']
         self.tracker_min_size = params['tracker_min_size']
+        
+        # CSRTフレーム機能パラメータ（統合設定）
+        self.enable_csrt_recovery = params['enable_csrt_recovery']
+        self.frame_buffer_duration = params['frame_buffer_duration']
+        self.time_travel_seconds = params['time_travel_seconds']
+        self.fast_forward_frames = params['fast_forward_frames']
+        self.recovery_attempt_frames = params['recovery_attempt_frames']
+        
+        # CSRTトラッカー内部パラメータ（フィルタリング）
+        self.csrt_params = {k: v for k, v in params.items() if k.startswith('csrt_')}
     
     def _setup_cuda_environment(self):
         """CUDA環境設定（GPU最適化）"""
@@ -97,9 +109,28 @@ class LangSAMTrackerNode(Node):
                 'bbox_min_size': self.bbox_min_size,
                 'tracker_min_size': self.tracker_min_size
             })
+            # CSRTパラメータ設定
+            if self.csrt_params:
+                self.tracker.set_csrt_params(self.csrt_params)
         except Exception as e:
             self.get_logger().error(f"トラッカー初期化失敗: {e}")
             raise
+    
+    def _initialize_csrt_features(self):
+        """CSRTフレーム機能初期化（統合設定対応）"""
+        if self.enable_csrt_recovery:
+            try:
+                self.csrt_frame_manager = CSRTFrameManager(buffer_duration=self.frame_buffer_duration)
+                self.get_logger().info(
+                    f"CSRT復旧機能初期化完了: バッファ{self.frame_buffer_duration}秒, "
+                    f"時間復旧{self.time_travel_seconds}秒, 早送り{self.fast_forward_frames}フレーム"
+                )
+            except Exception as e:
+                self.get_logger().error(f"CSRT復旧機能初期化失敗: {e}")
+                self.enable_csrt_recovery = False
+                self.csrt_frame_manager = None
+        else:
+            self.get_logger().info("CSRT復旧機能は無効化されています")
     
     def _setup_communication(self):
         """ROS2通信設定（サブスクライバー・パブリッシャー）"""
@@ -125,8 +156,9 @@ class LangSAMTrackerNode(Node):
             image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             current_time = time.time()
             
-            # FrameBufferのフレーム登録を削除（不要）
-            # self.frame_manager.process_incoming_frame(image)
+            # CSRTフレーム保存（統合復旧機能）
+            if self.enable_csrt_recovery and self.csrt_frame_manager:
+                self.csrt_frame_manager.process_incoming_frame(image)
             
             # GroundingDINO実行判定（時間ベース・非同期）
             with self.lock:
@@ -145,10 +177,7 @@ class LangSAMTrackerNode(Node):
                 self.thread_pool.submit(self._async_gdino_processing, image.copy())
             
             # CSRT+SAM2同期実行（30Hz、毎フレーム）
-            if self.enable_tracking:
-                self._run_csrt_and_sam(image)
-            else:
-                self._publish_original_images(image)
+            self._run_csrt_and_sam(image)
                 
         except Exception as e:
             self.get_logger().error(f"画像処理エラー: {e}")
@@ -216,14 +245,16 @@ class LangSAMTrackerNode(Node):
             
             # CSRT+SAM2統合実行（複製防止のためロック）
             with self.lock:
-                if self.enable_sam:
-                    result = self.tracker.update_trackers_with_sam(image)
-                else:
-                    result = self.tracker.update_trackers_only(image)
+                result = self.tracker.update_trackers_with_sam(image)
             
-            if result is None:
-                self._publish_fallback_images(image)
-                return
+            # トラッキング失敗時の復旧処理（統合設定対応）
+            if (result is None or len(result.get('boxes', [])) == 0) and self.enable_csrt_recovery:
+                recovery_result = self._attempt_tracking_recovery(image)
+                if recovery_result:
+                    result = recovery_result
+                else:
+                    self._publish_fallback_images(image)
+                    return
             
             # 追跡結果抽出
             boxes = result.get('boxes', [])
@@ -235,7 +266,7 @@ class LangSAMTrackerNode(Node):
             self._publish_tracking(image, boxes, labels, self.csrt_pub)
             
             # SAM2結果配信（セグメンテーションマスク描画）
-            if self.enable_sam and len(boxes) > 0:
+            if len(boxes) > 0:
                 self._publish_segmentation(image, masks, mask_scores, boxes, labels, self.sam_pub)
             else:
                 self.sam_pub.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
@@ -244,24 +275,20 @@ class LangSAMTrackerNode(Node):
             self.get_logger().error(f"CSRT+SAMエラー: {e}")
             self._publish_fallback_images(image)
     
-    def _publish_original_images(self, image: np.ndarray):
-        """元画像を全チャンネル配信（トラッキング無効時）"""
-        try:
-            msg = self.bridge.cv2_to_imgmsg(image, 'bgr8')
-            self.gdino_pub.publish(msg)
-            self.csrt_pub.publish(msg)
-            self.sam_pub.publish(msg)
-        except Exception as e:
-            self.get_logger().error(f"元画像配信エラー: {e}")
     
     def _publish_fallback_images(self, image: np.ndarray):
         """フォールバック画像配信（エラー時CSRT・SAM継続）"""
+        self._publish_to_multiple([self.csrt_pub, self.sam_pub], image)
+    
+    def _publish_to_multiple(self, publishers, image: np.ndarray, error_msg: str = None):
+        """複数パブリッシャーに画像配信"""
         try:
             msg = self.bridge.cv2_to_imgmsg(image, 'bgr8')
-            self.csrt_pub.publish(msg)
-            self.sam_pub.publish(msg)
-        except Exception:
-            pass
+            for publisher in publishers:
+                publisher.publish(msg)
+        except Exception as e:
+            if error_msg:
+                self.get_logger().error(f"{error_msg}: {e}")
     
     def _draw_results(self, image: np.ndarray, masks, boxes, labels, scores):
         """結果描画"""
@@ -286,62 +313,125 @@ class LangSAMTrackerNode(Node):
     
     def _publish_detection(self, image: np.ndarray, boxes, labels, scores, publisher):
         """GroundingDINO検出結果配信（BoundingBox + ラベル描画）"""
-        try:
-            if len(boxes) == 0:
-                publisher.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
-                return
-            
-            result_bgr = self._draw_results(image, [], boxes, labels, scores)
-            publisher.publish(self.bridge.cv2_to_imgmsg(result_bgr, 'bgr8'))
-            
-        except Exception as e:
-            self.get_logger().error(f"検出結果配信エラー: {e}")
-            publisher.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
+        self._publish_with_results(image, publisher, boxes, labels, scores, [], "検出結果配信エラー")
     
     def _publish_tracking(self, image: np.ndarray, boxes, labels, publisher):
         """CSRT追跡結果配信（リアルタイム追跡BOX描画）"""
+        dummy_scores = np.ones(len(boxes)) if len(boxes) > 0 else []
+        self._publish_with_results(image, publisher, boxes, labels, dummy_scores, [], "追跡結果配信エラー")
+    
+    def _publish_with_results(self, image: np.ndarray, publisher, boxes, labels, scores, masks, error_msg: str):
+        """結果付き画像配信（共通処理）"""
         try:
             if len(boxes) == 0:
                 publisher.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
                 return
             
-            dummy_scores = np.ones(len(boxes))
-            result_bgr = self._draw_results(image, [], boxes, labels, dummy_scores)
+            result_bgr = self._draw_results(image, masks, boxes, labels, scores)
             publisher.publish(self.bridge.cv2_to_imgmsg(result_bgr, 'bgr8'))
             
         except Exception as e:
-            self.get_logger().error(f"追跡結果配信エラー: {e}")
+            self.get_logger().error(f"{error_msg}: {e}")
             publisher.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
     
     def _publish_segmentation(self, image: np.ndarray, masks, mask_scores, boxes, labels, publisher):
         """SAM2セグメンテーション結果配信（高精度マスク描画）"""
+        validated_data = self._validate_segmentation_data(masks, mask_scores, boxes, labels)
+        if not validated_data:
+            publisher.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
+            return
+        
+        masks_array, scores_array, boxes_array = validated_data
+        self._publish_with_results(image, publisher, boxes_array, labels, scores_array, masks_array, "セグメンテーション配信エラー")
+    
+    def _validate_segmentation_data(self, masks, mask_scores, boxes, labels):
+        """セグメンテーションデータ検証"""
+        boxes_array = np.array(boxes) if len(boxes) > 0 else np.array([])
+        if boxes_array.size == 0 or len(labels) == 0:
+            return None
+        
+        # mask_scores配列安全処理
+        if not isinstance(mask_scores, np.ndarray) or mask_scores.size == 0:
+            scores_array = np.ones(len(boxes))
+        elif mask_scores.ndim != 1 or len(mask_scores) != len(boxes):
+            scores_array = np.ones(len(boxes))
+        else:
+            scores_array = mask_scores
+        
+        # masks配列安全処理
+        if isinstance(masks, (list, tuple)) and len(masks) > 0:
+            masks_array = np.array(masks)
+        elif isinstance(masks, np.ndarray) and masks.size > 0:
+            masks_array = masks
+        else:
+            masks_array = np.array([])
+        
+        return masks_array, scores_array, boxes_array
+    
+    def _attempt_tracking_recovery(self, current_image: np.ndarray) -> Optional[Dict]:
+        """トラッキング失敗時の時間さかのぼり・早送り復旧処理（統合設定対応）"""
         try:
-            # 入力データ安全性チェック
-            boxes_array = np.array(boxes) if len(boxes) > 0 else np.array([])
-            if boxes_array.size == 0 or len(labels) == 0:
-                publisher.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
-                return
+            # フレームマネージャーが有効でない場合は復旧なし
+            if not self.csrt_frame_manager:
+                return None
+                
+            self.get_logger().info("トラッキング失敗 - 時間さかのぼり復旧開始")
             
-            # mask_scores配列安全処理（SAM2信頼度）
-            if not isinstance(mask_scores, np.ndarray) or mask_scores.size == 0:
-                mask_scores = np.ones(len(boxes))
-            elif mask_scores.ndim != 1 or len(mask_scores) != len(boxes):
-                mask_scores = np.ones(len(boxes))
+            # 設定時間で過去フレーム取得
+            past_frame_data = self.csrt_frame_manager.get_past_frame(seconds_ago=self.time_travel_seconds)
+            if past_frame_data:
+                past_frame, timestamp = past_frame_data
+                self.get_logger().info(f"{self.time_travel_seconds}秒前フレームで復旧試行: {timestamp}")
+                
+                # 過去フレームでトラッキング再試行
+                if hasattr(self.tracker, 'coordinator') and hasattr(self.tracker.coordinator, 'tracking_manager'):
+                    tracking_manager = self.tracker.coordinator.tracking_manager
+                    if tracking_manager:
+                        # 過去フレームでトラッキング実行
+                        past_result = tracking_manager.update_all_trackers(past_frame)
+                        
+                        if past_result and len(past_result) > 0:
+                            self.get_logger().info("過去フレームで復旧成功 - 早送りキャッチアップ開始")
+                            
+                            # 早送り機能で現在フレームまでキャッチアップ
+                            return self._fast_forward_catchup(tracking_manager, current_image)
             
-            # masks配列安全処理（SAM2セグメンテーションマスク）
-            if isinstance(masks, (list, tuple)) and len(masks) > 0:
-                masks_array = np.array(masks)
-            elif isinstance(masks, np.ndarray) and masks.size > 0:
-                masks_array = masks
-            else:
-                masks_array = np.array([])
-            
-            result_bgr = self._draw_results(image, masks_array, boxes_array, labels, mask_scores)
-            publisher.publish(self.bridge.cv2_to_imgmsg(result_bgr, 'bgr8'))
+            # 復旧失敗
+            self.get_logger().warning("時間さかのぼり復旧失敗")
+            return None
             
         except Exception as e:
-            self.get_logger().error(f"セグメンテーション配信エラー: {e}")
-            publisher.publish(self.bridge.cv2_to_imgmsg(image, 'bgr8'))
+            self.get_logger().error(f"復旧処理エラー: {e}")
+            return None
+    
+    def _fast_forward_catchup(self, tracking_manager, target_image: np.ndarray) -> Optional[Dict]:
+        """早送り機能で現在フレームまでキャッチアップ（統合設定対応）"""
+        try:
+            # 設定フレーム数で高速キャッチアップ
+            recent_frames = self.csrt_frame_manager.get_recent_frames(count=self.fast_forward_frames)
+            
+            if len(recent_frames) > 1:
+                self.get_logger().info(f"早送りキャッチアップ: {len(recent_frames)}フレーム処理")
+                
+                # 高速バッチ処理（最新N フレーム使用）
+                process_frames = recent_frames[-self.recovery_attempt_frames:]
+                for frame, timestamp in process_frames:
+                    tracking_manager.update_all_trackers(frame)
+                
+                # 最終的に現在フレームで結果取得
+                final_result = tracking_manager.update_all_trackers(target_image)
+                
+                if final_result and len(final_result) > 0:
+                    self.get_logger().info("早送りキャッチアップ成功")
+                    
+                    # SAM2付きで最終結果生成
+                    return self.tracker.update_trackers_with_sam(target_image)
+            
+            return None
+            
+        except Exception as e:
+            self.get_logger().error(f"早送りキャッチアップエラー: {e}")
+            return None
 
 
 def main(args=None):
