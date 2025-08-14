@@ -14,9 +14,9 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    # パッケージ内のconfig.yamlファイルのパスを取得
+    # 正しいパッケージ（lang_sam_executor）からconfig.yamlファイルのパスを取得
     config_file = os.path.join(
-        FindPackageShare('lang_sam_wrapper').find('lang_sam_wrapper'),
+        FindPackageShare('lang_sam_executor').find('lang_sam_executor'),
         'config',
         'config.yaml'
     )
