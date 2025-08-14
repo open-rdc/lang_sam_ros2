@@ -14,41 +14,48 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 from PIL import Image as PILImage
 
-# LangSAM統合トラッカー（GroundingDINO + CSRT + SAM2）
-from lang_sam.lang_sam_tracker import LangSAMTracker
+# 統合後のモジュール
+from lang_sam.tracker_utils import LangSAMTracker, CSRTFrameManager
 from lang_sam.utils import draw_image
-# CSRTフレーム機能をインポート（画像保存・時間さかのぼり・早送り）
-from lang_sam.lang_sam_tracker import CSRTFrameManager
 
 # ROS2関係のユーティリティ
 from lang_sam_wrapper.utils import TrackerParameterManager, ImagePublisher
 
 
 class LangSAMTrackerNode(Node):
-    """ゼロショット物体検出・追跡・セグメンテーション統合ノード
+    """リアルタイム物体検出・追跡・セグメンテーション統合ノード
     
-    処理フロー:
-    1. GroundingDINO: テキストプロンプトによるゼロショット物体検出（1Hz非同期）
-    2. CSRT: Channel and Spatial Reliability Tracking（30Hz同期）
-    3. SAM2: Segment Anything Model 2によるセグメンテーション（30Hz同期）
+    技術アーキテクチャ:
+    - GroundingDINO: 自然言語プロンプトを用いたゼロショット物体検出（1Hz間隔でGPU推論）
+    - CSRT: 高精度なビジュアルトラッキングアルゴリズム（毎フレーム30Hz実行）
+    - SAM2: セマンティックセグメンテーション（トラッキング結果に基づく高精度マスク生成）
+    
+    システム設計: 検出処理とトラッキング処理を分離し、リアルタイム性能を確保
     """
     
     def __init__(self):
         super().__init__('lang_sam_tracker_node')
         
-        # ROS2基盤設定
+        # ROS2メッセージブリッジとスレッド管理の初期化
+        # CvBridge: OpenCV画像とROS Image メッセージ間の変換を担当
         self.bridge = CvBridge()
         self.image_publisher = ImagePublisher(self)
+        
+        # GroundingDINO実行間隔制御：重い推論処理の頻度調整
         self.last_gdino_time = 0.0
         self.gdino_processing = False
+        
+        # スレッドセーフティ確保：GroundingDINOとCSRTの並行処理制御
         self.lock = threading.Lock()
+        # 非同期推論専用スレッドプール：GroundingDINO処理をメインループから分離
         self.thread_pool = ThreadPoolExecutor(max_workers=1)
         
-        # CSRTフレームマネージャー初期化（パラメータ化対応）
-        # フレームバッファリングが有効な場合のみ初期化
+        # CSRT復旧機能用フレームバッファマネージャー
+        # 目的: トラッキング失敗時の時間遡行による復旧処理実現
         self.csrt_frame_manager = None
         
-        # パラメータ管理（簡素化）
+        # ROS2パラメータサーバーからの設定読み込み
+        # 技術的理由: 実行時パラメータ調整とマルチ環境対応のため
         param_manager = TrackerParameterManager(self)
         params = param_manager.initialize_parameters()
         self._load_parameters(params)
@@ -90,17 +97,31 @@ class LangSAMTrackerNode(Node):
         self.fast_forward_frames = params['fast_forward_frames']
         self.recovery_attempt_frames = params['recovery_attempt_frames']
         
-        # CSRTトラッカー内部パラメータ（フィルタリング）
+        # CSRT内部アルゴリズムパラメータ（24項目の詳細調整）
+        # 目的：HOG特徴量、色特徴量、スケール探索などの最適化
         self.csrt_params = {k: v for k, v in params.items() if k.startswith('csrt_')}
     
     def _setup_cuda_environment(self):
-        """CUDA環境設定（GPU最適化）"""
+        """GPU計算環境の最適化設定
+        
+        技術的処理：
+        - PyTorchのUserWarning抑制（開発環境での冗長ログ削減）
+        - CUDAキャッシュクリア（GPUメモリリーク防止）
+        - GPU利用可能性確認と初期化
+        """
         warnings.filterwarnings("ignore", category=UserWarning)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()  # GPU VRAM初期化
     
     def _initialize_tracker(self):
-        """LangSAMトラッカー初期化（SAM2 + GroundingDINO + CSRT）"""
+        """統合AI推論パイプラインの初期化
+        
+        技術的構成：
+        1. SAM2モデル（hiera_tiny/small/base/large）の選択的読み込み
+        2. GroundingDINOによるゼロショット物体検出機能
+        3. CSRTトラッカーによる高精度追跡機能
+        4. 各コンポーネント間の連携インターフェース構築
+        """
         try:
             self.tracker = LangSAMTracker(sam_type=self.sam_model)
             self.tracker.set_tracking_targets(self.tracking_targets)
@@ -109,15 +130,22 @@ class LangSAMTrackerNode(Node):
                 'bbox_min_size': self.bbox_min_size,
                 'tracker_min_size': self.tracker_min_size
             })
-            # CSRTパラメータ設定
+            # CSRT内部アルゴリズムの詳細パラメータ調整（24項目）
+            # 技術的目的：HOG特徴量、色特徴量、スケール探索の最適化
             if self.csrt_params:
                 self.tracker.set_csrt_params(self.csrt_params)
         except Exception as e:
-            self.get_logger().error(f"トラッカー初期化失敗: {e}")
+            self.get_logger().error(f"統合AI推論システム初期化失敗: {e}")
             raise
     
     def _initialize_csrt_features(self):
-        """CSRTフレーム機能初期化（統合設定対応）"""
+        """トラッキング復旧用フレームバッファシステム初期化
+        
+        技術的機能：
+        - リングバッファによる過去フレーム履歴保持
+        - 時間インデックス管理による高速フレーム検索
+        - トラッキング失敗検出時の自動復旧トリガー
+        """
         if self.enable_csrt_recovery:
             try:
                 self.csrt_frame_manager = CSRTFrameManager(buffer_duration=self.frame_buffer_duration)
@@ -133,7 +161,13 @@ class LangSAMTrackerNode(Node):
             self.get_logger().info("CSRT復旧機能は無効化されています")
     
     def _setup_communication(self):
-        """ROS2通信設定（サブスクライバー・パブリッシャー）"""
+        """ROS2ノード間通信インターフェースの構築
+        
+        通信設計：
+        - 入力：ZEDカメラからのRGB画像ストリーム（30Hz）
+        - 出力：3チャンネル画像配信（検出/追跡/セグメンテーション結果）
+        - QoSプロファイル：リアルタイム性優先の設定
+        """
         # ZED画像入力サブスクライバー
         self.image_sub = self.create_subscription(
             Image, self.input_topic, self.image_callback, 10
@@ -243,12 +277,17 @@ class LangSAMTrackerNode(Node):
                 self._publish_fallback_images(image)
                 return
             
+            # トラッカーの有効性確認（復旧処理の前提条件）
+            if not self.tracker.has_active_tracking:
+                self._publish_fallback_images(image)
+                return
+            
             # CSRT+SAM2統合実行（複製防止のためロック）
             with self.lock:
                 result = self.tracker.update_trackers_with_sam(image)
             
             # トラッキング失敗時の復旧処理（統合設定対応）
-            if (result is None or len(result.get('boxes', [])) == 0) and self.enable_csrt_recovery:
+            if (result is None or len(result.get('boxes', [])) == 0) and self.enable_csrt_recovery and self.tracker.has_active_tracking:
                 recovery_result = self._attempt_tracking_recovery(image)
                 if recovery_result:
                     result = recovery_result
@@ -371,33 +410,38 @@ class LangSAMTrackerNode(Node):
     def _attempt_tracking_recovery(self, current_image: np.ndarray) -> Optional[Dict]:
         """トラッキング失敗時の時間さかのぼり・早送り復旧処理（統合設定対応）"""
         try:
-            # フレームマネージャーが有効でない場合は復旧なし
-            if not self.csrt_frame_manager:
+            # フレームマネージャーとトラッカーの有効性確認
+            if (not self.csrt_frame_manager or 
+                not hasattr(self.tracker, 'coordinator') or 
+                not hasattr(self.tracker.coordinator, 'tracking_manager') or
+                not self.tracker.coordinator.tracking_manager):
                 return None
                 
-            self.get_logger().info("トラッキング失敗 - 時間さかのぼり復旧開始")
+            tracking_manager = self.tracker.coordinator.tracking_manager
+            
+            # アクティブトラッカーが存在しない場合は復旧不可
+            if not tracking_manager.has_active_trackers():
+                return None
+                
+            self.get_logger().debug("トラッキング失敗 - 時間さかのぼり復旧開始")
             
             # 設定時間で過去フレーム取得
             past_frame_data = self.csrt_frame_manager.get_past_frame(seconds_ago=self.time_travel_seconds)
             if past_frame_data:
                 past_frame, timestamp = past_frame_data
-                self.get_logger().info(f"{self.time_travel_seconds}秒前フレームで復旧試行: {timestamp}")
+                self.get_logger().debug(f"{self.time_travel_seconds}秒前フレームで復旧試行: {timestamp}")
                 
-                # 過去フレームでトラッキング再試行
-                if hasattr(self.tracker, 'coordinator') and hasattr(self.tracker.coordinator, 'tracking_manager'):
-                    tracking_manager = self.tracker.coordinator.tracking_manager
-                    if tracking_manager:
-                        # 過去フレームでトラッキング実行
-                        past_result = tracking_manager.update_all_trackers(past_frame)
-                        
-                        if past_result and len(past_result) > 0:
-                            self.get_logger().info("過去フレームで復旧成功 - 早送りキャッチアップ開始")
-                            
-                            # 早送り機能で現在フレームまでキャッチアップ
-                            return self._fast_forward_catchup(tracking_manager, current_image)
+                # 過去フレームでトラッキング実行
+                past_result = tracking_manager.update_all_trackers(past_frame)
+                
+                if past_result and len(past_result) > 0:
+                    self.get_logger().debug("過去フレームで復旧成功 - 早送りキャッチアップ開始")
+                    
+                    # 早送り機能で現在フレームまでキャッチアップ
+                    return self._fast_forward_catchup(tracking_manager, current_image)
             
             # 復旧失敗
-            self.get_logger().warning("時間さかのぼり復旧失敗")
+            self.get_logger().debug("時間さかのぼり復旧失敗")
             return None
             
         except Exception as e:
@@ -443,8 +487,14 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+        except:
+            pass
+        try:
+            rclpy.shutdown()
+        except:
+            pass
 
 
 if __name__ == '__main__':
