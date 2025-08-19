@@ -78,13 +78,13 @@ class TrackerParameterManager(ParameterManager):
             # ROS2トピック設定
             'input_topic': {'default': '/zed/zed_node/rgb/image_rect_color', 'description': '入力画像トピック'},
             'gdino_topic': {'default': '/image_gdino', 'description': 'GroundingDINO結果トピック'},
-            'csrt_topic': {'default': '/image_csrt', 'description': 'CSRT結果トピック'},
+            'csrt_output_topic': {'default': '/image_csrt', 'description': 'CSRT結果トピック'},
             'sam_topic': {'default': '/image_sam', 'description': 'SAM2結果トピック'},
             
             # トラッキング設定
             'bbox_margin': {'default': 5, 'description': 'BoundingBox境界マージン'},
-            'bbox_min_size': {'default': 20, 'description': '最小BoundingBoxサイズ'},
-            'tracker_min_size': {'default': 10, 'description': 'トラッカー継続最小サイズ'},
+            'bbox_min_size': {'default': 3, 'description': '最小BoundingBoxサイズ（小さなBBOXも許可）'},
+            'tracker_min_size': {'default': 3, 'description': 'トラッカー継続最小サイズ（小さなBBOXも継続）'},
             
             # CSRTフレーム機能設定
             'enable_csrt_recovery': {'default': True, 'description': 'CSRT復旧機能統合有効化（バッファ・時間遡行・早送り）'},
@@ -129,7 +129,7 @@ class MultiViewParameterManager(ParameterManager):
             # 入力トピック設定
             'original_topic': {'default': '/zed/zed_node/rgb/image_rect_color', 'description': 'ZED生画像トピック'},
             'gdino_topic': {'default': '/image_gdino', 'description': 'GroundingDINO結果トピック'},
-            'csrt_topic': {'default': '/image_csrt', 'description': 'CSRT結果トピック'},
+            'csrt_output_topic': {'default': '/image_csrt', 'description': 'CSRT結果トピック'},
             'sam_topic': {'default': '/image_sam', 'description': 'SAM2結果トピック'},
             
             # 4分割画像出力設定

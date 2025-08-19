@@ -8,18 +8,18 @@ lang_sam_tracker_node:
     tracking_targets: ["white line", "red pylon", "human", "car"]  # CSRT追跡対象
     
     # ===== 実行周波数設定 =====
-    gdino_interval_seconds: 1.0  # GroundingDINO実行間隔（1.0秒 = 1Hz）
+    gdino_interval_seconds: 5.0  # GroundingDINO実行間隔（1.0秒 = 1Hz）
     
     # ===== ROS2トピック設定 =====
     input_topic: "/zed/zed_node/rgb/image_rect_color"  # 入力画像（ZEDカメラ）
     gdino_topic: "/image_gdino"    # GroundingDINO検出結果配信
-    csrt_topic: "/image_csrt"      # CSRT追跡結果配信
+    csrt_output_topic: "/image_csrt"      # CSRT追跡結果配信
     sam_topic: "/image_sam"        # SAM2セグメンテーション結果配信
     
     # ===== トラッキング設定 =====
     bbox_margin: 5                 # BoundingBox境界マージン（ピクセル）
-    bbox_min_size: 20              # 最小BoundingBoxサイズ（ピクセル）
-    tracker_min_size: 10           # トラッカー継続最小サイズ（ピクセル）
+    bbox_min_size: 3               # 最小BoundingBoxサイズ（ピクセル）- 小さなBBOXも許可
+    tracker_min_size: 3            # トラッカー継続最小サイズ（ピクセル）- 小さなBBOXも継続
     
     # ===== CSRTフレーム機能設定 =====
     enable_csrt_recovery: true           # CSRT復旧機能統合有効化（バッファ・時間遡行・早送り）
@@ -54,13 +54,16 @@ lang_sam_tracker_node:
     csrt_number_of_scales: 33             # スケール探索数（デフォルト：33、大=スケール頑健性向上）
     csrt_scale_sigma_factor: 0.25         # スケールσ係数（デフォルト：0.25、大=スケール範囲拡大）
     csrt_scale_model_max_area: 512.0      # スケール最大面積（デフォルト：512、大=大物体対応）
+    csrt_scale_lr: 0.025                  # スケール学習率（デフォルト：0.025、大=スケール高速適応）
+    csrt_scale_step: 1.02                 # スケールステップ（デフォルト：1.02、大=粗いスケール探索）
+    csrt_psr_threshold: 0.035             # PSR閾値（デフォルト：0.035、小=追跡継続しやすく）
 
 multi_view_node:
   ros__parameters:
     # ===== 入力トピック設定 =====
     original_topic: "/zed/zed_node/rgb/image_rect_color"  # ZED生画像
     gdino_topic: "/image_gdino"    # GroundingDINO検出結果画像
-    csrt_topic: "/image_csrt"      # CSRT追跡結果画像
+    csrt_output_topic: "/image_csrt"      # CSRT追跡結果画像
     sam_topic: "/image_sam"        # SAM2セグメンテーション結果画像
     
     # ===== 4分割画像出力設定 =====

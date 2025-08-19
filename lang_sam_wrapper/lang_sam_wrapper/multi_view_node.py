@@ -52,7 +52,7 @@ class MultiViewNode(Node):
         """パラメータ読み込み"""
         self.original_topic = params['original_topic']
         self.gdino_topic = params['gdino_topic']
-        self.csrt_topic = params['csrt_topic']
+        self.csrt_topic = params['csrt_output_topic']
         self.sam_topic = params['sam_topic']
         self.output_fps = params['output_fps']
         self.output_width = params['output_width']
