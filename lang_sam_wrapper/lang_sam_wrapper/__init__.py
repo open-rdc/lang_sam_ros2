@@ -1,5 +1,10 @@
 # lang_sam_ros2 package initialization
-from .lang_sam_tracker_node import LangSAMTrackerNode
+try:
+    from .lang_sam_tracker_node_native import LangSAMTrackerNodeNative
+except ImportError:
+    # Fallback if native tracker not available
+    LangSAMTrackerNodeNative = None
+
 from .multi_view_node import MultiViewNode
 from .debug_lang_segment_anything import LangSAMNode
 

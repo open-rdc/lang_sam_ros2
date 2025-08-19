@@ -134,6 +134,8 @@ class CSRTNativeClient:
             return []
             
         try:
+            self.logger.debug(f"[CSRTNativeClient] Processing {len(detections)} detections with labels: {labels}")
+            
             # Convert detections to proper format
             detection_rects = []
             for det in detections:
@@ -144,7 +146,7 @@ class CSRTNativeClient:
                 detection_rects.append(rect)
             
             results = self.manager.process_detections(image, detection_rects, labels)
-            self.logger.info(f"Native C++ CSRT processed {len(results)} detections")
+            self.logger.info(f"[CSRTNativeClient] Native C++ CSRT processed {len(results)} detections, created {len(results)} trackers")
             return results
             
         except Exception as e:
@@ -159,7 +161,8 @@ class CSRTNativeClient:
         try:
             results = self.manager.update_trackers(image)
             if results:
-                self.logger.debug(f"Native C++ CSRT updated {len(results)} trackers")
+                labels = self.get_tracker_labels()
+                self.logger.debug(f"[CSRTNativeClient] Native C++ CSRT updated {len(results)} trackers with labels: {labels}")
             return results
             
         except Exception as e:
@@ -179,9 +182,11 @@ class CSRTNativeClient:
         return 0
     
     def get_tracker_labels(self) -> list:
-        """Get current tracker labels"""
+        """Get current tracker labels (with debugging)"""
         if self.manager:
-            return self.manager.get_tracker_labels()
+            labels = self.manager.get_tracker_labels()
+            self.logger.debug(f"[CSRTNativeClient] Retrieved {len(labels)} labels from C++: {labels}")
+            return labels
         return []
     
     def is_available(self) -> bool:

@@ -1,6 +1,7 @@
 #include "csrt_tracker_native.hpp"
 #include <iostream>
 #include <algorithm>
+#include <cctype>
 
 namespace csrt_native {
 
@@ -161,8 +162,15 @@ std::vector<cv::Rect2d> CSRTManagerNative::process_detections(
     // Clear existing trackers and create new ones
     trackers_.clear();
     tracker_labels_.clear();
+    tracker_order_.clear();  // Clear order tracking
     
     std::vector<cv::Rect2d> results;
+    
+    std::cout << "[C++ CSRTManager] Processing " << detections.size() << " detections with labels: ";
+    for (size_t i = 0; i < labels.size(); ++i) {
+        std::cout << "'" << labels[i] << "'" << (i < labels.size()-1 ? ", " : "");
+    }
+    std::cout << std::endl;
     
     for (size_t i = 0; i < detections.size(); ++i) {
         const auto& bbox = detections[i];
@@ -171,21 +179,25 @@ std::vector<cv::Rect2d> CSRTManagerNative::process_detections(
         // Clip and validate bbox
         cv::Rect2d clipped_bbox = clip_bbox(bbox, image.size());
         if (!is_valid_bbox(clipped_bbox, image.size())) {
+            std::cout << "[C++ CSRTManager] Skipping invalid bbox for label: " << label << std::endl;
             continue;
         }
         
-        // Create tracker
+        // Create tracker with consistent ID generation
         std::string tracker_id = generate_tracker_id(label);
         auto tracker = std::make_shared<CSRTTrackerNative>(tracker_id, default_params_);
         
         if (tracker->initialize(image, clipped_bbox)) {
             trackers_[tracker_id] = tracker;
             tracker_labels_[tracker_id] = label;
+            tracker_order_.push_back(tracker_id);  // Maintain order
             results.push_back(clipped_bbox);
+            
+            std::cout << "[C++ CSRTManager] Created tracker: " << tracker_id << " for label: " << label << std::endl;
         }
     }
     
-    std::cout << "Created " << trackers_.size() << " OpenCV 4.5+ compatible CSRT trackers" << std::endl;
+    std::cout << "[C++ CSRTManager] Successfully created " << trackers_.size() << " CSRT trackers" << std::endl;
     return results;
 }
 
@@ -197,11 +209,16 @@ std::vector<cv::Rect2d> CSRTManagerNative::update_trackers(const cv::Mat& image)
     std::vector<cv::Rect2d> results;
     std::vector<std::string> failed_trackers;
     
-    for (auto& pair : trackers_) {
-        const std::string& tracker_id = pair.first;
-        auto& tracker = pair.second;
+    // Process trackers in order to maintain label consistency
+    for (const std::string& tracker_id : tracker_order_) {
+        auto tracker_it = trackers_.find(tracker_id);
+        if (tracker_it == trackers_.end()) {
+            continue;  // Tracker was already removed
+        }
         
+        auto& tracker = tracker_it->second;
         cv::Rect2d bbox;
+        
         if (tracker->update(image, bbox)) {
             results.push_back(bbox);
         } else {
@@ -209,10 +226,22 @@ std::vector<cv::Rect2d> CSRTManagerNative::update_trackers(const cv::Mat& image)
         }
     }
     
-    // Remove failed trackers
+    // Remove failed trackers and maintain order
     for (const auto& tracker_id : failed_trackers) {
         trackers_.erase(tracker_id);
         tracker_labels_.erase(tracker_id);
+        
+        // Remove from order tracking
+        tracker_order_.erase(
+            std::remove(tracker_order_.begin(), tracker_order_.end(), tracker_id),
+            tracker_order_.end()
+        );
+        
+        std::cout << "[C++ CSRTManager] Removed failed tracker: " << tracker_id << std::endl;
+    }
+    
+    if (!tracker_order_.empty()) {
+        std::cout << "[C++ CSRTManager] Updated " << tracker_order_.size() << " trackers, results: " << results.size() << std::endl;
     }
     
     return results;
@@ -221,13 +250,28 @@ std::vector<cv::Rect2d> CSRTManagerNative::update_trackers(const cv::Mat& image)
 void CSRTManagerNative::clear_trackers() {
     trackers_.clear();
     tracker_labels_.clear();
+    tracker_order_.clear();
 }
 
 std::vector<std::string> CSRTManagerNative::get_tracker_labels() const {
     std::vector<std::string> labels;
-    for (const auto& pair : tracker_labels_) {
-        labels.push_back(pair.second);
+    
+    // Return labels in the same order as trackers were created
+    for (const std::string& tracker_id : tracker_order_) {
+        auto label_it = tracker_labels_.find(tracker_id);
+        if (label_it != tracker_labels_.end()) {
+            // Extract clean label from tracker_id (remove _number suffix)
+            std::string clean_label = extract_clean_label(tracker_id);
+            labels.push_back(clean_label);
+        }
     }
+    
+    std::cout << "[C++ CSRTManager] Returning " << labels.size() << " labels in order: ";
+    for (size_t i = 0; i < labels.size(); ++i) {
+        std::cout << "'" << labels[i] << "'" << (i < labels.size()-1 ? ", " : "");
+    }
+    std::cout << std::endl;
+    
     return labels;
 }
 
@@ -259,6 +303,21 @@ bool CSRTManagerNative::is_valid_bbox(const cv::Rect2d& bbox, const cv::Size& im
 
 std::string CSRTManagerNative::generate_tracker_id(const std::string& label) {
     return label + "_" + std::to_string(next_tracker_id_++);
+}
+
+std::string CSRTManagerNative::extract_clean_label(const std::string& tracker_id) const {
+    // Extract label from tracker_id by removing the "_number" suffix
+    size_t last_underscore = tracker_id.find_last_of('_');
+    if (last_underscore != std::string::npos) {
+        std::string suffix = tracker_id.substr(last_underscore + 1);
+        // Check if suffix is a number
+        bool is_number = !suffix.empty() && std::all_of(suffix.begin(), suffix.end(), ::isdigit);
+        if (is_number) {
+            return tracker_id.substr(0, last_underscore);
+        }
+    }
+    // If no valid numeric suffix found, return the whole string
+    return tracker_id;
 }
 
 } // namespace csrt_native

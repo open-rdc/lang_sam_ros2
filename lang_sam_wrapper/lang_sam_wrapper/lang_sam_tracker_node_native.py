@@ -161,7 +161,7 @@ class LangSAMTrackerNodeNative(Node):
                         box_threshold=self.box_threshold,
                         text_threshold=self.text_threshold,
                         update_trackers=False,  # Disable built-in tracking
-                        run_sam=False  # Disable SAM for now
+                        run_sam=True  # Enable SAM for segmentation
                     )
                     
                     # Extract detections from results - Fixed format parsing
@@ -252,12 +252,16 @@ class LangSAMTrackerNodeNative(Node):
                     if native_results:
                         self.get_logger().debug(f"Frame {self.frame_count}: Native C++ CSRT updated {len(native_results)} trackers")
                         
+                        # Get labels from native C++ tracker (fixed order)
+                        tracker_labels = self.native_client.get_tracker_labels()
+                        self.get_logger().debug(f"[Native Node] C++ tracker returned {len(tracker_labels)} labels: {tracker_labels}")
+                        
                         # Convert native results to detection format for SAM
                         csrt_detections = []
                         for i, bbox_tuple in enumerate(native_results):
                             x, y, w, h = bbox_tuple
-                            # Use stored detection labels from GroundingDINO
-                            label = self.current_detection_labels[i] if i < len(self.current_detection_labels) else "tracked"
+                            # Use labels from C++ tracker (maintains correct order)
+                            label = tracker_labels[i] if i < len(tracker_labels) else "tracked"
                             
                             # Create detection-like object for compatibility
                             class CSRTDetection:
@@ -266,6 +270,7 @@ class LangSAMTrackerNodeNative(Node):
                                     self.label = label
                             
                             csrt_detections.append(CSRTDetection(x, y, w, h, label))
+                            self.get_logger().debug(f"[Native Node] CSRT Detection {i}: {label} at ({x}, {y}, {w}, {h})")
                         
                         # Create CSRT visualization using draw_image
                         xyxy = np.array([[det.x, det.y, det.x + det.width, det.y + det.height] for det in csrt_detections])
@@ -281,17 +286,66 @@ class LangSAMTrackerNodeNative(Node):
                         csrt_msg.header = msg.header
                         self.csrt_pub.publish(csrt_msg)
                         
-                        # Run SAM2 segmentation on CSRT results
+                        # Run SAM2 segmentation directly on CSRT bboxes
                         try:
-                            # Convert back to PIL format for SAM
-                            from PIL import Image as PILImage
-                            pil_image = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                            # Convert to RGB format for SAM
+                            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                             
-                            # Use built-in SAM functionality (temporarily use existing pipeline)
-                            # For now, skip SAM segmentation to focus on C++ CSRT testing
-                            # Create SAM placeholder visualization using draw_image
+                            # Convert CSRT detection boxes to xyxy format for SAM
+                            sam_boxes = []
+                            for det in csrt_detections:
+                                # Convert (x, y, w, h) to (x1, y1, x2, y2)
+                                x1, y1 = det.x, det.y
+                                x2, y2 = det.x + det.width, det.y + det.height
+                                sam_boxes.append([x1, y1, x2, y2])
+                            
+                            if sam_boxes:
+                                sam_boxes_array = np.array(sam_boxes)
+                                
+                                # Direct SAM prediction on CSRT bboxes (no GroundingDINO)
+                                sam_model = self.tracker.coordinator.sam
+                                masks, scores, logits = sam_model.predict(image_rgb, sam_boxes_array)
+                                
+                                # Use CSRT labels and SAM masks for visualization
+                                labels = [det.label for det in csrt_detections]
+                                xyxy = sam_boxes_array
+                                
+                                # Fix scores dimension: flatten to 1D if needed
+                                if scores is not None:
+                                    scores = np.array(scores)
+                                    if scores.ndim > 1:
+                                        scores = scores.flatten()
+                                    probs = scores
+                                else:
+                                    probs = np.ones(len(csrt_detections))
+                                
+                                # Convert masks to proper format for draw_image
+                                if masks is not None and len(masks) > 0:
+                                    if len(masks.shape) == 3:
+                                        # masks shape: (N, H, W) -> convert to bool
+                                        masks = masks.astype(bool)
+                                    sam_image_rgb = draw_image(image_rgb, masks, xyxy, probs, labels)
+                                else:
+                                    # No masks, use bounding boxes only
+                                    empty_masks = np.zeros((len(csrt_detections), image.shape[0], image.shape[1]), dtype=bool)
+                                    sam_image_rgb = draw_image(image_rgb, empty_masks, xyxy, probs, labels)
+                                
+                                sam_image = cv2.cvtColor(sam_image_rgb, cv2.COLOR_RGB2BGR)
+                            else:
+                                # No CSRT detections, show empty image
+                                sam_image = image.copy()
+                                cv2.putText(sam_image, "SAM: No CSRT detections", (10, 30), 
+                                           cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+                            
+                            sam_msg = self.cv_bridge.cv2_to_imgmsg(sam_image, 'bgr8')
+                            sam_msg.header = msg.header
+                            self.sam_pub.publish(sam_msg)
+                            
+                        except Exception as e:
+                            self.get_logger().error(f"SAM2 segmentation failed: {e}")
+                            # Fallback visualization with bounding boxes
                             xyxy = np.array([[det.x, det.y, det.x + det.width, det.y + det.height] for det in csrt_detections])
-                            labels = [det.label for det in csrt_detections]  # Use original GroundingDINO labels
+                            labels = [det.label for det in csrt_detections]
                             probs = np.ones(len(csrt_detections))
                             masks = np.zeros((len(csrt_detections), image.shape[0], image.shape[1]), dtype=bool)
                             
@@ -301,8 +355,6 @@ class LangSAMTrackerNodeNative(Node):
                             sam_msg = self.cv_bridge.cv2_to_imgmsg(sam_image, 'bgr8')
                             sam_msg.header = msg.header
                             self.sam_pub.publish(sam_msg)
-                        except Exception as e:
-                            self.get_logger().error(f"SAM2 segmentation failed: {e}")
                     
                     else:
                         # No trackers active, publish empty images with text overlay

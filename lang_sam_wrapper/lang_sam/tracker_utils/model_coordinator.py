@@ -17,6 +17,9 @@ from .tracking_manager import TrackingManager
 from .tracking_config import TrackingConfig
 from .exceptions import SAM2InitError, GroundingDINOError
 
+# デバッグモード制御（本番環境では False に設定）
+DEBUG_LABELS = True
+
 
 class ModelCoordinator:
     """AIモデル統合コーディネーター：複数AIモデルの協調処理管理
@@ -170,7 +173,7 @@ class ModelCoordinator:
         技術的統合：
         - 検出結果BBoxをCSRTトラッカーの初期化地点として使用
         - 相関フィルタベースのテンプレートマッチング初期化
-        - 物体ラベルとトラッカーIDの関連付け管理
+        - 物体ラベルとトラッカーIDの関連付け管理（ラベル整合性保証）
         """
         try:
             boxes = gdino_result.get("boxes", [])
@@ -179,9 +182,23 @@ class ModelCoordinator:
             if len(boxes) == 0 or not self.tracking_manager:
                 return gdino_result
             
+            # ラベルとボックスの数が一致することを確認
+            if len(boxes) != len(labels):
+                if DEBUG_LABELS:
+                    print(f"[ModelCoordinator] Warning: boxes={len(boxes)}, labels={len(labels)} 不一致")
+                return gdino_result
+            
+            # デバッグ: GroundingDINOの検出結果を記録
+            if DEBUG_LABELS:
+                print(f"[ModelCoordinator] GroundingDINO検出: {dict(zip(labels, ['bbox' for _ in labels]))}")
+            
             self.tracking_manager.initialize_trackers(boxes, labels, image_np)
             
             tracking_result = self.tracking_manager.get_tracking_result()
+            
+            # デバッグ: トラッキング結果を記録
+            if DEBUG_LABELS and tracking_result["labels"]:
+                print(f"[ModelCoordinator] トラッキング結果: {tracking_result['labels']}")
             
             if tracking_result["boxes"].size > 0:
                 return {
@@ -192,7 +209,9 @@ class ModelCoordinator:
             else:
                 return gdino_result
                 
-        except Exception:
+        except Exception as e:
+            if DEBUG_LABELS:
+                print(f"[ModelCoordinator] トラッキング統合エラー: {e}")
             return gdino_result
     
     def _prepare_sam_input(self, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -213,24 +232,37 @@ class ModelCoordinator:
                                sam_images: List[np.ndarray],
                                sam_boxes: List[np.ndarray], 
                                sam_indices: List[int]) -> None:
-        """SAM2バッチセグメンテーション推論：GPU効率化のための並列処理
+        """SAM2バッチセグメンテーション推論：GPU効率化のための並列処理（ラベル整合性保証）
         
         技術的最適化：
         - 複数画像の同時セグメンテーション処理
         - CUDA Kernelのバッチ実行による GPU 使用率向上
         - VRAMメモリと計算時間のバランシング最適化
+        - ラベルとマスクの順序一致性確保
         """
         try:
+            # デバッグ: SAM入力情報を記録
+            if DEBUG_LABELS:
+                for i, (idx, boxes) in enumerate(zip(sam_indices, sam_boxes)):
+                    labels = all_results[idx].get("labels", [])
+                    print(f"[ModelCoordinator] SAM入力[{i}]: idx={idx}, boxes={len(boxes)}, labels={labels}")
+            
             masks, mask_scores, _ = self.sam.predict_batch(sam_images, xyxy=sam_boxes)
             
-            for idx, mask, score in zip(sam_indices, masks, mask_scores):
+            # 結果をインデックス順に処理（ラベル順序保持）
+            for i, (idx, mask, score) in enumerate(zip(sam_indices, masks, mask_scores)):
+                if DEBUG_LABELS:
+                    labels = all_results[idx].get("labels", [])
+                    print(f"[ModelCoordinator] SAM出力[{i}]: idx={idx}, マスク数={len(mask) if hasattr(mask, '__len__') else 'N/A'}, labels={labels}")
+                
                 all_results[idx].update({
                     "masks": mask,
                     "mask_scores": score,
                 })
                 
-        except Exception:
-            pass
+        except Exception as e:
+            if DEBUG_LABELS:
+                print(f"[ModelCoordinator] SAM batch推論エラー: {e}")
     
     def update_tracking_only(self, image_np: np.ndarray) -> Dict[str, Any]:
         """高速CSRTトラッキングのみ実行：30Hzリアルタイム処理版
@@ -239,6 +271,7 @@ class ModelCoordinator:
         - GPU推論を回避したCPUベースの軽量処理
         - HOG特徴量と相関フィルタを使用した高速マッチング
         - フレーム間の小さな変化に対する適応的追跡
+        - ラベル整合性の継続保証
         """
         if not self.tracking_manager:
             return self._empty_result()
@@ -246,11 +279,17 @@ class ModelCoordinator:
         try:
             tracked_boxes = self.tracking_manager.update_all_trackers(image_np)
             if tracked_boxes:
-                return self.tracking_manager.get_tracking_result()
+                result = self.tracking_manager.get_tracking_result()
+                # デバッグ: トラッキング専用モードのラベル確認
+                if DEBUG_LABELS and result["labels"]:
+                    print(f"[ModelCoordinator] Tracking-only結果: {result['labels']}")
+                return result
             else:
                 return self._empty_result()
                 
-        except Exception:
+        except Exception as e:
+            if DEBUG_LABELS:
+                print(f"[ModelCoordinator] Tracking-onlyエラー: {e}")
             return self._empty_result()
     
     def update_tracking_with_sam(self, image_np: np.ndarray) -> Dict[str, Any]:
@@ -274,6 +313,10 @@ class ModelCoordinator:
             boxes = tracking_result["boxes"]
             labels = tracking_result["labels"]
             
+            # デバッグ: Tracking+SAM入力ラベル確認
+            if DEBUG_LABELS:
+                print(f"[ModelCoordinator] Tracking+SAM入力: boxes={len(boxes)}, labels={labels}")
+            
             try:
                 masks, mask_scores, _ = self.sam.predict_batch(
                     [image_np], xyxy=[boxes]
@@ -283,6 +326,10 @@ class ModelCoordinator:
                     masks, mask_scores, len(boxes)
                 )
                 
+                # デバッグ: Tracking+SAM出力確認
+                if DEBUG_LABELS:
+                    print(f"[ModelCoordinator] Tracking+SAM出力: マスク数={len(result_masks)}, labels={labels}")
+                
                 return {
                     "boxes": boxes,
                     "labels": labels,
@@ -291,7 +338,9 @@ class ModelCoordinator:
                     "mask_scores": result_scores
                 }
                 
-            except Exception:
+            except Exception as e:
+                if DEBUG_LABELS:
+                    print(f"[ModelCoordinator] Tracking+SAM SAM処理エラー: {e}")
                 return {
                     **tracking_result,
                     "masks": [],

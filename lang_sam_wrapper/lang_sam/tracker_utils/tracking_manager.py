@@ -45,11 +45,12 @@ class TrackingManager:
         self.config = config
     
     def initialize_trackers(self, boxes: np.ndarray, labels: List[str], image: np.ndarray) -> None:
-        """複数トラッカー初期化"""
+        """複数トラッカー初期化（ラベル順序保持）"""
         try:
             self.clear_trackers()
             
             height, width = image.shape[:2]
+            valid_tracker_count = 0
             
             for i, (box, label) in enumerate(zip(boxes, labels)):
                 if not self._is_target_label(label):
@@ -59,12 +60,14 @@ class TrackingManager:
                 if bbox is None:
                     continue
                 
-                tracker_id = f"{label}_{i}"
+                # 有効なトラッカー番号を使用（インデックス不一致を防止）
+                tracker_id = f"{label}_{valid_tracker_count}"
                 try:
                     tracker = CSRTTracker(tracker_id, bbox, image, self.csrt_params)
                     if tracker.is_initialized:
                         self.trackers[tracker_id] = tracker
                         self.tracked_boxes[tracker_id] = list(bbox)
+                        valid_tracker_count += 1
                 except CSRTTrackingError:
                     continue
                     
@@ -72,9 +75,14 @@ class TrackingManager:
             raise CSRTTrackingError("batch", "initialization", e)
     
     def _is_target_label(self, label: str) -> bool:
-        """追跡対象判定"""
+        """追跡対象判定（完全一致または接頭詞一致）"""
         label_lower = label.lower()
-        return any(target in label_lower for target in self.tracking_targets)
+        # 完全一致を優先
+        for target in self.tracking_targets:
+            target_lower = target.lower()
+            if label_lower == target_lower or label_lower.startswith(target_lower):
+                return True
+        return False
     
     def _process_bbox(self, box: np.ndarray, width: int, height: int) -> Optional[Tuple[int, int, int, int]]:
         """バウンディングボックス座標の正規化とロバスト検証
@@ -215,7 +223,7 @@ class TrackingManager:
         self.tracked_boxes.clear()
     
     def get_tracking_result(self) -> Dict[str, Any]:
-        """追跡結果取得（ラベル名から番号部分を除去）"""
+        """追跡結果取得（順序保持とラベル正確性確保）"""
         if not self.tracked_boxes:
             return {
                 "boxes": np.array([]),
@@ -223,19 +231,32 @@ class TrackingManager:
                 "scores": np.array([])
             }
         
-        boxes = list(self.tracked_boxes.values())
+        # トラッカーIDでソートして順序を安定化
+        sorted_items = sorted(self.tracked_boxes.items())
+        
+        boxes = []
         labels = []
-        for tracker_id in self.tracked_boxes.keys():
-            if '_' in tracker_id and tracker_id.split('_')[-1].isdigit():
-                label = '_'.join(tracker_id.split('_')[:-1])
+        
+        for tracker_id, bbox in sorted_items:
+            boxes.append(bbox)
+            
+            # ラベル名を正確に抽出（番号部分を除去）
+            if '_' in tracker_id:
+                # 最後の '_数字' を除去
+                parts = tracker_id.split('_')
+                if len(parts) >= 2 and parts[-1].isdigit():
+                    label = '_'.join(parts[:-1])
+                else:
+                    label = tracker_id
             else:
                 label = tracker_id
+            
             labels.append(label)
         
         scores = np.ones(len(boxes))
         
         return {
-            "boxes": np.array(boxes),
+            "boxes": np.array(boxes) if boxes else np.array([]),
             "labels": labels,
             "scores": scores
         }

@@ -5,30 +5,88 @@ from PIL import Image
 
 MIN_AREA = 100
 
+# デバッグモード制御（本番環境では False に設定）
+DEBUG_LABELS = True
+
 
 def load_image(image_path: str):
     return Image.open(image_path).convert("RGB")
 
 
 def draw_image(image_rgb, masks, xyxy, probs, labels):
+    """画像に検出結果を描画（ラベル整合性保証）"""
+    
+    # デバッグ: 入力データの整合性確認
+    if DEBUG_LABELS:
+        print(f"[draw_image] 入力データ: boxes={len(xyxy)}, labels={labels}, probs={len(probs)}")
+    
+    # 入力データの整合性チェック
+    if len(xyxy) != len(labels) or len(xyxy) != len(probs):
+        if DEBUG_LABELS:
+            print(f"[draw_image] Warning: データサイズ不一致 - boxes:{len(xyxy)}, labels:{len(labels)}, probs:{len(probs)}")
+        # 最小サイズに合わせて調整
+        min_size = min(len(xyxy), len(labels), len(probs))
+        xyxy = xyxy[:min_size]
+        labels = labels[:min_size]
+        probs = probs[:min_size]
+        if hasattr(masks, '__len__') and len(masks) > min_size:
+            masks = masks[:min_size]
+    
+    if len(labels) == 0:
+        return image_rgb
+    
     box_annotator = sv.BoxCornerAnnotator()
     label_annotator = sv.LabelAnnotator()
     mask_annotator = sv.MaskAnnotator()
-    # Create class_id for each unique label
-    unique_labels = list(set(labels))
+    
+    # Create class_id for each unique label (順序保持）
+    unique_labels = []
+    for label in labels:
+        if label not in unique_labels:
+            unique_labels.append(label)
+    
     class_id_map = {label: idx for idx, label in enumerate(unique_labels)}
     class_id = [class_id_map[label] for label in labels]
+    
+    # デバッグ: ラベルマッピング確認
+    if DEBUG_LABELS:
+        for i, (label, cls_id) in enumerate(zip(labels, class_id)):
+            print(f"[draw_image] オブジェクト[{i}]: label='{label}', class_id={cls_id}")
+
+    # マスクデータの安全な処理
+    mask_data = None
+    if hasattr(masks, '__len__') and len(masks) > 0:
+        try:
+            if isinstance(masks, np.ndarray):
+                mask_data = masks.astype(bool)
+            else:
+                # リスト形式のマスクを処理
+                mask_data = np.array(masks).astype(bool) if masks else None
+        except Exception as e:
+            if DEBUG_LABELS:
+                print(f"[draw_image] マスク処理エラー: {e}")
+            mask_data = None
 
     # Add class_id to the Detections object
     detections = sv.Detections(
-        xyxy=xyxy,
-        mask=masks.astype(bool),
-        confidence=probs,
+        xyxy=np.array(xyxy),
+        mask=mask_data,
+        confidence=np.array(probs),
         class_id=np.array(class_id),
     )
-    annotated_image = box_annotator.annotate(scene=image_rgb.copy(), detections=detections)
-    annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
-    annotated_image = mask_annotator.annotate(scene=annotated_image, detections=detections)
+    
+    # 段階的に描画（エラー箇所特定のため）
+    try:
+        annotated_image = image_rgb.copy()
+        annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections)
+        annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
+        if mask_data is not None:
+            annotated_image = mask_annotator.annotate(scene=annotated_image, detections=detections)
+    except Exception as e:
+        if DEBUG_LABELS:
+            print(f"[draw_image] 描画エラー: {e}")
+        return image_rgb
+        
     return annotated_image
 
 

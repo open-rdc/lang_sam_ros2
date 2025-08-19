@@ -103,6 +103,7 @@ public:
 private:
     std::unordered_map<std::string, std::shared_ptr<CSRTTrackerNative>> trackers_;
     std::unordered_map<std::string, std::string> tracker_labels_;
+    std::vector<std::string> tracker_order_;  // Maintain insertion order
     CSRTParams default_params_;
     int next_tracker_id_;
     
@@ -114,6 +115,7 @@ private:
     cv::Rect2d clip_bbox(const cv::Rect2d& bbox, const cv::Size& image_size);
     bool is_valid_bbox(const cv::Rect2d& bbox, const cv::Size& image_size);
     std::string generate_tracker_id(const std::string& label);
+    std::string extract_clean_label(const std::string& tracker_id) const;
 };
 
 } // namespace csrt_native
