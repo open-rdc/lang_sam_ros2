@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Launch file for LangSAM with Native C++ CSRT Tracker
+Launch file for LangSAM with Python CSRT Tracker (Fixed Label Mapping)
 """
 
 import os
@@ -23,17 +23,23 @@ def generate_launch_description():
         description='Enable debug mode with verbose logging'
     )
     
+    env_arg = DeclareLaunchArgument(
+        'env',
+        default_value='default',
+        description='Environment configuration (default, production)'
+    )
+    
     config_arg = DeclareLaunchArgument(
         'config',
         default_value=config_file,
         description='Path to configuration file'
     )
     
-    # Native C++ CSRT tracker node
-    lang_sam_native_node = Node(
+    # Python CSRT tracker node (uses fixed label mapping)
+    lang_sam_tracker_node = Node(
         package='lang_sam_wrapper',
-        executable='lang_sam_tracker_node_native.py',
-        name='lang_sam_tracker_native_node',
+        executable='lang_sam_tracker_node.py',  # Using Python version with fixed tracking
+        name='lang_sam_tracker_node',
         parameters=[LaunchConfiguration('config')],
         output='screen',
         emulate_tty=True,
@@ -42,7 +48,7 @@ def generate_launch_description():
         respawn_delay=5.0
     )
     
-    # Multi-view visualization node (optional)
+    # Multi-view visualization node
     multi_view_node = Node(
         package='lang_sam_wrapper',
         executable='multi_view_node.py',
@@ -57,17 +63,18 @@ def generate_launch_description():
     
     return LaunchDescription([
         debug_arg,
+        env_arg,
         config_arg,
         
-        # Launch native C++ CSRT tracker node
-        lang_sam_native_node,
+        # Launch Python CSRT tracker node (fixed labels)
+        lang_sam_tracker_node,
         
         # Launch multi-view visualization
         multi_view_node,
         
         # Log launch information
         ExecuteProcess(
-            cmd=['echo', 'LangSAM Native C++ CSRT Tracker launched successfully'],
+            cmd=['echo', 'LangSAM Python CSRT Tracker launched successfully (Fixed Label Mapping)'],
             output='screen'
         )
     ])

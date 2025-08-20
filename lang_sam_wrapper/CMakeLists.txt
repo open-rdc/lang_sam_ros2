@@ -29,7 +29,7 @@ ament_python_install_package(lang_sam)
 
 # Create pybind11 module for native CSRT tracking
 add_library(csrt_native MODULE
-  csrt_cpp/csrt_tracker_native.cpp
+  csrt_cpp/csrt_tracker.cpp
   csrt_cpp/python_bindings.cpp
 )
 
@@ -53,8 +53,8 @@ install(TARGETS csrt_native
 # Install Python scripts as executables
 install(PROGRAMS
   lang_sam_wrapper/debug_lang_segment_anything.py
-  lang_sam_wrapper/lang_sam_tracker_node_native.py
   lang_sam_wrapper/lang_sam_tracker_node.py
+  lang_sam_wrapper/lang_sam_tracker_node_legacy.py
   lang_sam_wrapper/multi_view_node.py
   DESTINATION lib/${PROJECT_NAME}
 )

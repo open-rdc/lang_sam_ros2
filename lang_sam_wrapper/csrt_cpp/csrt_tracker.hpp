@@ -1,5 +1,5 @@
-#ifndef CSRT_TRACKER_NATIVE_HPP
-#define CSRT_TRACKER_NATIVE_HPP
+#ifndef CSRT_TRACKER_HPP
+#define CSRT_TRACKER_HPP
 
 #include <opencv2/opencv.hpp>
 // Include tracking headers in correct order for OpenCV 4.5+
@@ -120,4 +120,4 @@ private:
 
 } // namespace csrt_native
 
-#endif // CSRT_TRACKER_NATIVE_HPP
+#endif // CSRT_TRACKER_HPP

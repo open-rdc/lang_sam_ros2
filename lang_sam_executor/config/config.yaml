@@ -8,7 +8,7 @@ lang_sam_tracker_node:
     tracking_targets: ["white line", "red pylon", "human", "car"]  # CSRT追跡対象
     
     # ===== 実行周波数設定 =====
-    gdino_interval_seconds: 5.0  # GroundingDINO実行間隔（1.0秒 = 1Hz）
+    gdino_interval_seconds: 1.0  # GroundingDINO実行間隔（1.0秒 = 1Hz）
     
     # ===== ROS2トピック設定 =====
     input_topic: "/zed/zed_node/rgb/image_rect_color"  # 入力画像（ZEDカメラ）

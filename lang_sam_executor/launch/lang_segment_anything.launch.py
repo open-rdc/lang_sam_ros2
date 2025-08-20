@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Launch file for LangSAM with Python CSRT Tracker (Fixed Label Mapping)
+Launch file for LangSAM with Native C++ CSRT Tracker
 """
 
 import os
@@ -23,22 +23,16 @@ def generate_launch_description():
         description='Enable debug mode with verbose logging'
     )
     
-    env_arg = DeclareLaunchArgument(
-        'env',
-        default_value='default',
-        description='Environment configuration (default, production)'
-    )
-    
     config_arg = DeclareLaunchArgument(
         'config',
         default_value=config_file,
         description='Path to configuration file'
     )
     
-    # Python CSRT tracker node (uses fixed label mapping)
-    lang_sam_tracker_node = Node(
+    # Main LangSAM tracker node (with C++ CSRT)
+    lang_sam_node = Node(
         package='lang_sam_wrapper',
-        executable='lang_sam_tracker_node.py',  # Using Python version with fixed tracking
+        executable='lang_sam_tracker_node.py',
         name='lang_sam_tracker_node',
         parameters=[LaunchConfiguration('config')],
         output='screen',
@@ -48,7 +42,7 @@ def generate_launch_description():
         respawn_delay=5.0
     )
     
-    # Multi-view visualization node
+    # Multi-view visualization node (optional)
     multi_view_node = Node(
         package='lang_sam_wrapper',
         executable='multi_view_node.py',
@@ -63,18 +57,17 @@ def generate_launch_description():
     
     return LaunchDescription([
         debug_arg,
-        env_arg,
         config_arg,
         
-        # Launch Python CSRT tracker node (fixed labels)
-        lang_sam_tracker_node,
+        # Launch main LangSAM tracker node
+        lang_sam_node,
         
         # Launch multi-view visualization
         multi_view_node,
         
         # Log launch information
         ExecuteProcess(
-            cmd=['echo', 'LangSAM Python CSRT Tracker launched successfully (Fixed Label Mapping)'],
+            cmd=['echo', 'LangSAM Tracker launched successfully'],
             output='screen'
         )
     ])

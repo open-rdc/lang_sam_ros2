@@ -13,20 +13,20 @@ try:
     # Import C++ extension
     from lang_sam_wrapper.csrt_native import CSRTParams, CSRTTrackerNative, CSRTManagerNative
     NATIVE_AVAILABLE = True
-    print("[CSRTNativeClient] Native C++ CSRT extension loaded successfully")
+    print("[CSRTClient] C++ CSRT extension loaded successfully")
 except ImportError as e:
-    print(f"[CSRTNativeClient] Native C++ extension not available: {e}")
+    print(f"[CSRTClient] C++ extension not available: {e}")
     NATIVE_AVAILABLE = False
 
-class CSRTNativeClient:
-    """Client for native C++ CSRT tracker with ROS parameter integration"""
+class CSRTClient:
+    """Client for C++ CSRT tracker with ROS parameter integration"""
     
     def __init__(self, node: Node):
         self.node = node
         self.logger = node.get_logger()
         
         if not NATIVE_AVAILABLE:
-            self.logger.error("Native C++ CSRT extension not available")
+            self.logger.error("C++ CSRT extension not available")
             self.manager = None
             return
             

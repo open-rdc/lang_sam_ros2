@@ -1,7 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
-#include "csrt_tracker_native.hpp"
+#include "csrt_tracker.hpp"
 
 namespace py = pybind11;
 
