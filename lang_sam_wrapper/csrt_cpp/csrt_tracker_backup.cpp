@@ -14,26 +14,92 @@ CSRTTrackerNative::~CSRTTrackerNative() = default;
 
 void CSRTTrackerNative::create_tracker_with_params() {
     try {
+        // Create CSRT parameters object
         cv::TrackerCSRT::Params csrt_params;
         
-        // Apply parameters from config.yaml
+        // Apply custom parameters from CSRTParams struct
         csrt_params.use_hog = params_.use_hog;
+        csrt_params.use_color_names = params_.use_color_names;
         csrt_params.use_gray = params_.use_gray;
+        csrt_params.use_rgb = params_.use_rgb;
+        csrt_params.use_channel_weights = params_.use_channel_weights;
         csrt_params.use_segmentation = params_.use_segmentation;
-        csrt_params.template_size = std::min(params_.template_size, 200.0f);
-        csrt_params.number_of_scales = std::min(params_.number_of_scales, 35);
-        csrt_params.psr_threshold = params_.psr_threshold;
-        csrt_params.scale_step = std::min(params_.scale_step, 1.1f);
+        
+        // Window function settings
+        csrt_params.window_function = params_.window_function;
+        csrt_params.kaiser_alpha = params_.kaiser_alpha;
+        csrt_params.cheb_attenuation = params_.cheb_attenuation;
+        
+        // Template and filter parameters
+        csrt_params.template_size = params_.template_size;
+        csrt_params.gsl_sigma = params_.gsl_sigma;
+        csrt_params.hog_orientations = params_.hog_orientations;
+        csrt_params.hog_clip = params_.hog_clip;
+        csrt_params.padding = params_.padding;
         csrt_params.filter_lr = params_.filter_lr;
         csrt_params.weights_lr = params_.weights_lr;
         
-        // Create tracker with custom parameters
+        // Advanced parameters
+        csrt_params.num_hog_channels_used = params_.num_hog_channels_used;
+        csrt_params.admm_iterations = params_.admm_iterations;
+        csrt_params.histogram_bins = params_.histogram_bins;
+        csrt_params.histogram_lr = params_.histogram_lr;
+        
+        // Scale and segmentation parameters
+        csrt_params.background_ratio = params_.background_ratio;
+        csrt_params.number_of_scales = params_.number_of_scales;
+        csrt_params.scale_sigma_factor = params_.scale_sigma_factor;
+        csrt_params.scale_model_max_area = params_.scale_model_max_area;
+        csrt_params.scale_lr = params_.scale_lr;
+        csrt_params.scale_step = params_.scale_step;
+        csrt_params.psr_threshold = params_.psr_threshold;
+        
+        // Create tracker with parameters
         tracker_ = cv::TrackerCSRT::create(csrt_params);
         
-        std::cout << "[" << tracker_id_ << "] ✅ CSRT tracker created with config.yaml parameters" << std::endl;
-        
+        if (tracker_) {
+            std::cout << "[" << tracker_id_ << "] CSRT tracker created with custom parameters" << std::endl;
+        } else {
+            // Fallback to legacy API with parameters
+            cv::legacy::TrackerCSRT::Params legacy_params;
+            
+            // Copy parameters to legacy format
+            legacy_params.use_hog = params_.use_hog;
+            legacy_params.use_color_names = params_.use_color_names;
+            legacy_params.use_gray = params_.use_gray;
+            legacy_params.use_rgb = params_.use_rgb;
+            legacy_params.use_channel_weights = params_.use_channel_weights;
+            legacy_params.use_segmentation = params_.use_segmentation;
+            legacy_params.window_function = params_.window_function;
+            legacy_params.kaiser_alpha = params_.kaiser_alpha;
+            legacy_params.cheb_attenuation = params_.cheb_attenuation;
+            legacy_params.template_size = params_.template_size;
+            legacy_params.gsl_sigma = params_.gsl_sigma;
+            legacy_params.hog_orientations = params_.hog_orientations;
+            legacy_params.hog_clip = params_.hog_clip;
+            legacy_params.padding = params_.padding;
+            legacy_params.filter_lr = params_.filter_lr;
+            legacy_params.weights_lr = params_.weights_lr;
+            legacy_params.num_hog_channels_used = params_.num_hog_channels_used;
+            legacy_params.admm_iterations = params_.admm_iterations;
+            legacy_params.histogram_bins = params_.histogram_bins;
+            legacy_params.histogram_lr = params_.histogram_lr;
+            legacy_params.background_ratio = params_.background_ratio;
+            legacy_params.number_of_scales = params_.number_of_scales;
+            legacy_params.scale_sigma_factor = params_.scale_sigma_factor;
+            legacy_params.scale_model_max_area = params_.scale_model_max_area;
+            legacy_params.scale_lr = params_.scale_lr;
+            legacy_params.scale_step = params_.scale_step;
+            legacy_params.psr_threshold = params_.psr_threshold;
+            
+            auto legacy_tracker = cv::legacy::TrackerCSRT::create(legacy_params);
+            if (legacy_tracker) {
+                tracker_ = cv::legacy::upgradeTrackingAPI(legacy_tracker);
+                std::cout << "[" << tracker_id_ << "] CSRT tracker created with legacy API and custom parameters" << std::endl;
+            }
+        }
     } catch (const std::exception& e) {
-        std::cerr << "[" << tracker_id_ << "] ❌ CSRT tracker creation failed: " << e.what() << std::endl;
+        std::cerr << "[" << tracker_id_ << "] Exception creating CSRT tracker: " << e.what() << std::endl;
         tracker_ = nullptr;
     }
 }

@@ -25,7 +25,7 @@ class LangSAMTrackerNode(Node):
     def __init__(self):
         super().__init__('lang_sam_tracker_node')
         
-        self.get_logger().info("Initializing LangSAMTrackerNode with C++ CSRT")
+        self.get_logger().info("Initializing LangSAM Tracker Node with C++ CSRT")
         
         # Initialize CV Bridge
         self.cv_bridge = CvBridge()
@@ -246,15 +246,15 @@ class LangSAMTrackerNode(Node):
                     self.last_gdino_time = current_time
                 
                 else:
-                    # Only run native C++ CSRT tracking
+                    # Only run C++ CSRT tracking (single call with labels)
                     csrt_results = self.csrt_client.update_trackers(image)
                     
                     if csrt_results:
                         self.get_logger().debug(f"Frame {self.frame_count}: C++ CSRT updated {len(csrt_results)} trackers")
                         
-                        # Get labels from native C++ tracker (fixed order)
-                        tracker_labels = self.csrt_client.get_tracker_labels()
-                        self.get_logger().debug(f"[Native Node] C++ tracker returned {len(tracker_labels)} labels: {tracker_labels}")
+                        # Get labels from C++ tracker (returned with update_trackers)
+                        tracker_labels = self.csrt_client.get_cached_labels()  # Use cached labels from update call
+                        self.get_logger().debug(f"[Tracker Node] C++ tracker returned {len(tracker_labels)} labels: {tracker_labels}")
                         
                         # Convert native results to detection format for SAM
                         csrt_detections = []
@@ -272,15 +272,17 @@ class LangSAMTrackerNode(Node):
                             csrt_detections.append(CSRTDetection(x, y, w, h, label))
                             self.get_logger().debug(f"[Native Node] CSRT Detection {i}: {label} at ({x}, {y}, {w}, {h})")
                         
-                        # Create CSRT visualization using draw_image
+                        # Prepare data for visualization (shared between CSRT and SAM)
                         xyxy = np.array([[det.x, det.y, det.x + det.width, det.y + det.height] for det in csrt_detections])
                         labels = [det.label for det in csrt_detections]
                         probs = np.ones(len(csrt_detections))  # All tracking results have confidence 1.0
-                        masks = np.zeros((len(csrt_detections), image.shape[0], image.shape[1]), dtype=bool)  # Empty masks
+                        empty_masks = np.zeros((len(csrt_detections), image.shape[0], image.shape[1]), dtype=bool)
                         
-                        # Convert BGR to RGB for draw_image
+                        # Convert BGR to RGB once for all visualizations
                         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                        csrt_image_rgb = draw_image(image_rgb, masks, xyxy, probs, labels)
+                        
+                        # Create CSRT visualization
+                        csrt_image_rgb = draw_image(image_rgb, empty_masks, xyxy, probs, labels)
                         csrt_image = cv2.cvtColor(csrt_image_rgb, cv2.COLOR_RGB2BGR)
                         csrt_msg = self.cv_bridge.cv2_to_imgmsg(csrt_image, 'bgr8')
                         csrt_msg.header = msg.header
@@ -288,8 +290,6 @@ class LangSAMTrackerNode(Node):
                         
                         # Run SAM2 segmentation directly on CSRT bboxes
                         try:
-                            # Convert to RGB format for SAM
-                            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                             
                             # Convert CSRT detection boxes to xyxy format for SAM
                             sam_boxes = []
@@ -343,14 +343,8 @@ class LangSAMTrackerNode(Node):
                             
                         except Exception as e:
                             self.get_logger().error(f"SAM2 segmentation failed: {e}")
-                            # Fallback visualization with bounding boxes
-                            xyxy = np.array([[det.x, det.y, det.x + det.width, det.y + det.height] for det in csrt_detections])
-                            labels = [det.label for det in csrt_detections]
-                            probs = np.ones(len(csrt_detections))
-                            masks = np.zeros((len(csrt_detections), image.shape[0], image.shape[1]), dtype=bool)
-                            
-                            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                            sam_image_rgb = draw_image(image_rgb, masks, xyxy, probs, labels)
+                            # Fallback: use already prepared CSRT visualization data
+                            sam_image_rgb = draw_image(image_rgb, empty_masks, xyxy, probs, labels)
                             sam_image = cv2.cvtColor(sam_image_rgb, cv2.COLOR_RGB2BGR)
                             sam_msg = self.cv_bridge.cv2_to_imgmsg(sam_image, 'bgr8')
                             sam_msg.header = msg.header
@@ -371,7 +365,7 @@ class LangSAMTrackerNode(Node):
     
     def destroy_node(self):
         """Clean shutdown"""
-        self.get_logger().info("Shutting down LangSAM Native Node")
+        self.get_logger().info("Shutting down LangSAM Tracker Node")
         if hasattr(self, 'native_client'):
             self.csrt_client.clear_trackers()
         super().destroy_node()
@@ -379,6 +373,7 @@ class LangSAMTrackerNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
+    node = None
     
     try:
         node = LangSAMTrackerNode()
@@ -388,9 +383,17 @@ def main(args=None):
     except Exception as e:
         print(f"Error: {e}")
     finally:
-        if 'node' in locals():
-            node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if node is not None:
+                node.destroy_node()
+        except Exception:
+            pass  # Ignore destruction errors
+        
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass  # Ignore shutdown errors
 
 
 if __name__ == '__main__':

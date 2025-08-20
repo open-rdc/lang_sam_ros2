@@ -24,6 +24,7 @@ class CSRTClient:
     def __init__(self, node: Node):
         self.node = node
         self.logger = node.get_logger()
+        self._cached_labels = []  # Cache for labels to avoid redundant calls
         
         if not NATIVE_AVAILABLE:
             self.logger.error("C++ CSRT extension not available")
@@ -69,6 +70,9 @@ class CSRTClient:
             'csrt_number_of_scales': (params.number_of_scales, int),
             'csrt_scale_sigma_factor': (params.scale_sigma_factor, float),
             'csrt_scale_model_max_area': (params.scale_model_max_area, float),
+            'csrt_scale_lr': (params.scale_lr, float),
+            'csrt_scale_step': (params.scale_step, float),
+            'csrt_psr_threshold': (params.psr_threshold, float),
         }
         
         for param_name, (default_value, param_type) in param_mapping.items():
@@ -116,6 +120,9 @@ class CSRTClient:
         self.logger.info(f"number_of_scales: {self.params.number_of_scales}")
         self.logger.info(f"scale_sigma_factor: {self.params.scale_sigma_factor}")
         self.logger.info(f"scale_model_max_area: {self.params.scale_model_max_area}")
+        self.logger.info(f"scale_lr: {self.params.scale_lr}")
+        self.logger.info(f"scale_step: {self.params.scale_step}")
+        self.logger.info(f"psr_threshold: {self.params.psr_threshold}")
         self.logger.info("=== End CSRT Parameters ===")
     
     def update_parameters_from_ros(self):
@@ -154,19 +161,19 @@ class CSRTClient:
             return []
     
     def update_trackers(self, image: np.ndarray):
-        """Update all trackers using native C++ CSRT"""
+        """Update all trackers using C++ CSRT and cache labels"""
         if not self.manager:
             return []
             
         try:
             results = self.manager.update_trackers(image)
-            if results:
-                labels = self.get_tracker_labels()
-                self.logger.debug(f"[CSRTNativeClient] Native C++ CSRT updated {len(results)} trackers with labels: {labels}")
+            # Cache labels immediately after update to avoid redundant calls
+            self._cached_labels = self.manager.get_tracker_labels() if results else []
+            self.logger.debug(f"[CSRTClient] C++ CSRT updated {len(results)} trackers with labels: {self._cached_labels}")
             return results
             
         except Exception as e:
-            self.logger.error(f"Error in native C++ tracker update: {e}")
+            self.logger.error(f"Error in C++ tracker update: {e}")
             return []
     
     def clear_trackers(self):
@@ -181,11 +188,15 @@ class CSRTClient:
             return self.manager.get_tracker_count()
         return 0
     
+    def get_cached_labels(self) -> list:
+        """Get cached tracker labels (avoids redundant C++ calls)"""
+        return self._cached_labels
+    
     def get_tracker_labels(self) -> list:
-        """Get current tracker labels (with debugging)"""
+        """Get current tracker labels from C++ (direct call)"""
         if self.manager:
             labels = self.manager.get_tracker_labels()
-            self.logger.debug(f"[CSRTNativeClient] Retrieved {len(labels)} labels from C++: {labels}")
+            self.logger.debug(f"[CSRTClient] Retrieved {len(labels)} labels from C++: {labels}")
             return labels
         return []
     

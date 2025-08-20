@@ -48,6 +48,9 @@ struct CSRTParams {
     int number_of_scales = 33;
     float scale_sigma_factor = 0.25f;
     float scale_model_max_area = 512.0f;
+    float scale_lr = 0.025f;
+    float scale_step = 1.02f;
+    float psr_threshold = 0.035f;
 };
 
 class CSRTTrackerNative {

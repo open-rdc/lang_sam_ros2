@@ -65,7 +65,10 @@ PYBIND11_MODULE(csrt_native, m) {
         .def_readwrite("background_ratio", &csrt_native::CSRTParams::background_ratio)
         .def_readwrite("number_of_scales", &csrt_native::CSRTParams::number_of_scales)
         .def_readwrite("scale_sigma_factor", &csrt_native::CSRTParams::scale_sigma_factor)
-        .def_readwrite("scale_model_max_area", &csrt_native::CSRTParams::scale_model_max_area);
+        .def_readwrite("scale_model_max_area", &csrt_native::CSRTParams::scale_model_max_area)
+        .def_readwrite("scale_lr", &csrt_native::CSRTParams::scale_lr)
+        .def_readwrite("scale_step", &csrt_native::CSRTParams::scale_step)
+        .def_readwrite("psr_threshold", &csrt_native::CSRTParams::psr_threshold);
     
     // CSRTTrackerNative
     py::class_<csrt_native::CSRTTrackerNative>(m, "CSRTTrackerNative")

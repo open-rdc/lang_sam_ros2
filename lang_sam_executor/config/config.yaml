@@ -31,10 +31,10 @@ lang_sam_tracker_node:
     # ===== CSRTトラッカー内部パラメータ =====
     # デフォルト値は速度重視設定。精度向上時はHOG/グレースケール/セグメンテーション有効化
     csrt_use_hog: true                    # HOG特徴量（デフォルト：true、false時は速度向上）
-    csrt_use_color_names: false           # 色名特徴量（デフォルト：false、true時は精度向上・計算量増）
-    csrt_use_gray: true                   # グレースケール（デフォルト：true、false時は色情報重視）
-    csrt_use_rgb: false                   # RGB特徴量（デフォルト：false、true時は色精度向上・計算量増）
-    csrt_use_channel_weights: false       # チャンネル重み（デフォルト：false、true時は適応的重み付け）
+    csrt_use_color_names: true           # 色名特徴量（デフォルト：false、true時は精度向上・計算量増）
+    csrt_use_gray: false                   # グレースケール（デフォルト：true、false時は色情報重視）
+    csrt_use_rgb: true                   # RGB特徴量（デフォルト：false、true時は色精度向上・計算量増）
+    csrt_use_channel_weights: true       # チャンネル重み（デフォルト：false、true時は適応的重み付け）
     csrt_use_segmentation: true           # セグメンテーション（デフォルト：true、false時は軽量化）
     csrt_window_function: "hann"          # 窓関数（デフォルト：hann、cosine/uniform選択可）
     csrt_kaiser_alpha: 3.75               # Kaiser窓α（デフォルト：3.75、大=シャープ、小=スムーズ）
@@ -43,19 +43,19 @@ lang_sam_tracker_node:
     csrt_gsl_sigma: 1.0                   # ガウシアンσ（デフォルト：1.0、大=広範囲探索）
     csrt_hog_orientations: 9              # HOG方向数（デフォルト：9、大=精度向上・計算量増）
     csrt_hog_clip: 0.2                    # HOGクリップ（デフォルト：0.2、小=特徴量保持強化）
-    csrt_padding: 3.0                     # パディング倍率（デフォルト：3.0、大=探索範囲拡大）
-    csrt_filter_lr: 0.02                  # フィルター学習率（デフォルト：0.02、大=高速適応・不安定化）
-    csrt_weights_lr: 0.02                 # 重み学習率（デフォルト：0.02、大=高速適応・不安定化）
+    csrt_padding: 4.0                     # パディング倍率（デフォルト：3.0、大=探索範囲拡大）
+    csrt_filter_lr: 0.04                  # フィルター学習率（デフォルト：0.02、大=高速適応・不安定化）
+    csrt_weights_lr: 0.04                 # 重み学習率（デフォルト：0.02、大=高速適応・不安定化）
     csrt_num_hog_channels_used: -1        # HOGチャンネル数（デフォルト：-1全て、正数=制限・軽量化）
     csrt_admm_iterations: 4               # ADMM反復数（デフォルト：4、大=精度向上・計算量増）
     csrt_histogram_bins: 16               # ヒストグラム量子化（デフォルト：16、大=精度向上・計算量増）
-    csrt_histogram_lr: 0.04               # ヒストグラム学習率（デフォルト：0.04、大=高速適応）
+    csrt_histogram_lr: 0.05               # ヒストグラム学習率（デフォルト：0.04、大=高速適応）
     csrt_background_ratio: 2              # 背景領域比率（デフォルト：2、大=背景情報増加）
-    csrt_number_of_scales: 33             # スケール探索数（デフォルト：33、大=スケール頑健性向上）
-    csrt_scale_sigma_factor: 0.25         # スケールσ係数（デフォルト：0.25、大=スケール範囲拡大）
-    csrt_scale_model_max_area: 512.0      # スケール最大面積（デフォルト：512、大=大物体対応）
-    csrt_scale_lr: 0.025                  # スケール学習率（デフォルト：0.025、大=スケール高速適応）
-    csrt_scale_step: 1.02                 # スケールステップ（デフォルト：1.02、大=粗いスケール探索）
+    csrt_number_of_scales: 51             # スケール探索数（デフォルト：33、大=スケール頑健性向上）
+    csrt_scale_sigma_factor: 0.75         # スケールσ係数（デフォルト：0.25、大=スケール範囲拡大）
+    csrt_scale_model_max_area: 2048.0      # スケール最大面積（デフォルト：512、大=大物体対応）
+    csrt_scale_lr: 0.045                  # スケール学習率（デフォルト：0.025、大=スケール高速適応）
+    csrt_scale_step: 1.22                 # スケールステップ（デフォルト：1.02、大=粗いスケール探索）
     csrt_psr_threshold: 0.035             # PSR閾値（デフォルト：0.035、小=追跡継続しやすく）
 
 multi_view_node:
