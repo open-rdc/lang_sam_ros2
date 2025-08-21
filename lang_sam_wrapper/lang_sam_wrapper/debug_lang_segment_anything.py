@@ -124,7 +124,7 @@ class LangSAMNode(Node):
                 
                 with torch.no_grad():  # メモリ効率化
                     try:
-                        results = self.model.predict([image_pil], [self.text_prompt])
+                        results = self.model.predict_with_tracking([image_pil], [self.text_prompt], update_trackers=False, run_sam=True)
                     except RuntimeError as cuda_error:
                         if "No available kernel" in str(cuda_error) or "CUDA" in str(cuda_error):
                             self.get_logger().warn(f"CUDA エラーが発生しました。CPUモードで再試行します: {cuda_error}")

@@ -6,7 +6,8 @@
 namespace csrt_native {
 
 CSRTTrackerNative::CSRTTrackerNative(const std::string& tracker_id, const CSRTParams& params)
-    : tracker_id_(tracker_id), params_(params), initialized_(false) {
+    : tracker_id_(tracker_id), params_(params), initialized_(false), 
+      consecutive_failures_(0), current_frame_id_(0) {
     create_tracker_with_params();
 }
 
@@ -146,8 +147,15 @@ void CSRTTrackerNative::set_params(const CSRTParams& params) {
 
 // CSRTManagerNative Implementation
 CSRTManagerNative::CSRTManagerNative(const CSRTParams& default_params)
-    : default_params_(default_params), next_tracker_id_(1), bbox_min_size_(3), bbox_margin_(5) {
+    : default_params_(default_params), next_tracker_id_(1), bbox_min_size_(3), bbox_margin_(5),
+      recovery_enabled_(default_params.enable_recovery), recovered_count_(0), failed_count_(0) {
     std::cout << "CSRTManagerNative initialized with OpenCV 4.5+ compatible API" << std::endl;
+    std::cout << "CSRT復旧機能: " << (recovery_enabled_ ? "有効" : "無効") << std::endl;
+    if (recovery_enabled_) {
+        std::cout << "  - フレームバッファ時間: " << default_params.buffer_duration << "秒" << std::endl;
+        std::cout << "  - 時間遡行秒数: " << default_params.time_travel_seconds << "秒" << std::endl;
+        std::cout << "  - 早送りフレーム数: " << default_params.fast_forward_frames << "フレーム" << std::endl;
+    }
 }
 
 CSRTManagerNative::~CSRTManagerNative() = default;
@@ -320,6 +328,266 @@ std::string CSRTManagerNative::extract_clean_label(const std::string& tracker_id
     }
     // If no valid numeric suffix found, return the whole string
     return tracker_id;
+}
+
+// CSRT復旧機能実装 - CSRTTrackerNative
+void CSRTTrackerNative::add_frame_to_buffer(const cv::Mat& image, const cv::Rect2d& bbox) {
+    if (!params_.enable_recovery) return;
+    
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    
+    frame_buffer_.emplace_back(image, ++current_frame_id_, bbox);
+    
+    // 古いフレームを削除
+    cleanup_old_frames();
+}
+
+void CSRTTrackerNative::cleanup_old_frames() {
+    auto now = std::chrono::high_resolution_clock::now();
+    auto buffer_duration = std::chrono::duration<float>(params_.buffer_duration);
+    
+    while (!frame_buffer_.empty()) {
+        auto age = std::chrono::duration_cast<std::chrono::duration<float>>(now - frame_buffer_.front().timestamp);
+        if (age > buffer_duration) {
+            frame_buffer_.pop_front();
+        } else {
+            break;
+        }
+    }
+}
+
+FrameData* CSRTTrackerNative::get_frame_time_ago(float seconds_ago) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    
+    auto now = std::chrono::high_resolution_clock::now();
+    auto target_time = now - std::chrono::duration<float>(seconds_ago);
+    
+    FrameData* closest_frame = nullptr;
+    auto min_diff = std::chrono::duration<float>::max();
+    
+    for (auto& frame_data : frame_buffer_) {
+        auto diff = std::chrono::duration_cast<std::chrono::duration<float>>(
+            target_time > frame_data.timestamp ? 
+            (target_time - frame_data.timestamp) : (frame_data.timestamp - target_time));
+        
+        if (diff < min_diff) {
+            min_diff = diff;
+            closest_frame = &frame_data;
+        }
+    }
+    
+    return closest_frame;
+}
+
+bool CSRTTrackerNative::attempt_recovery(const cv::Mat& current_image, cv::Rect2d& bbox) {
+    if (!params_.enable_recovery) return false;
+    
+    std::cout << "[" << tracker_id_ << "] ⚙️ CSRT復旧試行開始 (consecutive_failures: " << consecutive_failures_ << ")" << std::endl;
+    
+    // 1. 時間遡行復旧を試行
+    if (try_time_travel_recovery(current_image, bbox)) {
+        consecutive_failures_ = 0;
+        std::cout << "[" << tracker_id_ << "] ✅ 時間遡行復旧成功" << std::endl;
+        return true;
+    }
+    
+    // 2. 早送り復旧を試行
+    if (try_fast_forward_recovery(current_image, bbox)) {
+        consecutive_failures_ = 0;
+        std::cout << "[" << tracker_id_ << "] ✅ 早送り復旧成功" << std::endl;
+        return true;
+    }
+    
+    std::cout << "[" << tracker_id_ << "] ❌ CSRT復旧失敗" << std::endl;
+    return false;
+}
+
+bool CSRTTrackerNative::try_time_travel_recovery(const cv::Mat& current_image, cv::Rect2d& bbox) {
+    // 指定時間前のフレームを取得
+    FrameData* time_travel_frame = get_frame_time_ago(params_.time_travel_seconds);
+    
+    if (!time_travel_frame) {
+        return false;
+    }
+    
+    std::cout << "[" << tracker_id_ << "] 🕰️ 時間遡行: " << params_.time_travel_seconds 
+              << "秒前のフレームで再初期化" << std::endl;
+    
+    try {
+        // 新しいトラッカーを作成
+        create_tracker_with_params();
+        
+        // 過去のフレームで初期化（OpenCV 4.5+ init()はvoidを返す）
+        if (!tracker_) {
+            return false;
+        }
+        
+        try {
+            // cv::Rect2dをcv::Rectに変換（OpenCV API用）
+            cv::Rect init_rect(static_cast<int>(time_travel_frame->last_known_bbox.x),
+                              static_cast<int>(time_travel_frame->last_known_bbox.y),
+                              static_cast<int>(time_travel_frame->last_known_bbox.width),
+                              static_cast<int>(time_travel_frame->last_known_bbox.height));
+            
+            tracker_->init(time_travel_frame->frame, init_rect);
+            
+            // 現在のフレームで更新を試行
+            cv::Rect current_rect(static_cast<int>(bbox.x), static_cast<int>(bbox.y),
+                                 static_cast<int>(bbox.width), static_cast<int>(bbox.height));
+            bool success = tracker_->update(current_image, current_rect);
+            
+            // 結果をcv::Rect2dに戻す
+            bbox.x = static_cast<double>(current_rect.x);
+            bbox.y = static_cast<double>(current_rect.y);
+            bbox.width = static_cast<double>(current_rect.width);
+            bbox.height = static_cast<double>(current_rect.height);
+            
+            return success;
+        } catch (...) {
+            return false;
+        }
+        
+    } catch (const std::exception& e) {
+        std::cout << "[" << tracker_id_ << "] 時間遡行復旧エラー: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+bool CSRTTrackerNative::try_fast_forward_recovery(const cv::Mat& current_image, cv::Rect2d& bbox) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    
+    if (frame_buffer_.size() < static_cast<size_t>(params_.fast_forward_frames)) {
+        return false;
+    }
+    
+    std::cout << "[" << tracker_id_ << "] ⏩ 早送り復旧: 最新" << params_.fast_forward_frames 
+              << "フレームで続行試行" << std::endl;
+    
+    try {
+        // 新しいトラッカーを作成
+        create_tracker_with_params();
+        
+        // 最新Nフレームで段階的に更新
+        auto start_it = frame_buffer_.end() - params_.fast_forward_frames;
+        auto init_frame = start_it;
+        
+        // 最初のフレームで初期化
+        if (!tracker_) {
+            return false;
+        }
+        
+        try {
+            // 初期化用cv::Rect変換
+            cv::Rect init_rect(static_cast<int>(init_frame->last_known_bbox.x),
+                              static_cast<int>(init_frame->last_known_bbox.y),
+                              static_cast<int>(init_frame->last_known_bbox.width),
+                              static_cast<int>(init_frame->last_known_bbox.height));
+            
+            tracker_->init(init_frame->frame, init_rect);
+            
+            // 残りのフレームで順次更新
+            cv::Rect temp_rect = init_rect;
+            for (auto it = start_it + 1; it != frame_buffer_.end(); ++it) {
+                if (!tracker_->update(it->frame, temp_rect)) {
+                    return false;
+                }
+            }
+            
+            // 現在のフレームで最終更新
+            cv::Rect current_rect(static_cast<int>(bbox.x), static_cast<int>(bbox.y),
+                                 static_cast<int>(bbox.width), static_cast<int>(bbox.height));
+            bool success = tracker_->update(current_image, current_rect);
+            
+            // 結果をcv::Rect2dに戻す
+            bbox.x = static_cast<double>(current_rect.x);
+            bbox.y = static_cast<double>(current_rect.y);
+            bbox.width = static_cast<double>(current_rect.width);
+            bbox.height = static_cast<double>(current_rect.height);
+            
+            return success;
+        } catch (...) {
+            return false;
+        }
+        
+    } catch (const std::exception& e) {
+        std::cout << "[" << tracker_id_ << "] 早送り復旧エラー: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+// CSRT復旧機能実装 - CSRTManagerNative
+std::vector<cv::Rect2d> CSRTManagerNative::update_trackers_with_recovery(const cv::Mat& image) {
+    if (image.empty()) {
+        return {};
+    }
+    
+    std::vector<cv::Rect2d> results;
+    std::vector<std::string> failed_trackers;
+    std::vector<std::string> recovered_trackers;
+    
+    // Process trackers in order to maintain label consistency
+    for (const std::string& tracker_id : tracker_order_) {
+        auto tracker_it = trackers_.find(tracker_id);
+        if (tracker_it == trackers_.end()) {
+            continue;  // Tracker was already removed
+        }
+        
+        auto& tracker = tracker_it->second;
+        cv::Rect2d bbox;
+        
+        // フレームバッファに追加（最後の成功バウンディングボックス使用）
+        if (!results.empty()) {
+            tracker->add_frame_to_buffer(image, results.back());
+        }
+        
+        if (tracker->update(image, bbox)) {
+            tracker->reset_failure_count();
+            results.push_back(bbox);
+        } else {
+            // 復旧を試行
+            if (recovery_enabled_ && tracker->attempt_recovery(image, bbox)) {
+                recovered_trackers.push_back(tracker_id);
+                results.push_back(bbox);
+                recovered_count_++;
+            } else {
+                failed_trackers.push_back(tracker_id);
+                failed_count_++;
+            }
+        }
+    }
+    
+    // Remove permanently failed trackers
+    for (const auto& tracker_id : failed_trackers) {
+        trackers_.erase(tracker_id);
+        tracker_labels_.erase(tracker_id);
+        
+        // Remove from order tracking
+        tracker_order_.erase(
+            std::remove(tracker_order_.begin(), tracker_order_.end(), tracker_id),
+            tracker_order_.end()
+        );
+        
+        std::cout << "[C++ CSRTManager] ❌ 復旧失敗でトラッカー削除: " << tracker_id << std::endl;
+    }
+    
+    // 復旧成功のログ
+    for (const auto& tracker_id : recovered_trackers) {
+        std::cout << "[C++ CSRTManager] ✅ トラッカー復旧成功: " << tracker_id << std::endl;
+    }
+    
+    if (!tracker_order_.empty()) {
+        std::cout << "[C++ CSRTManager] 📊 復旧結果 - トラッカー: " << tracker_order_.size() 
+                  << ", 結果: " << results.size()
+                  << ", 復旧: " << recovered_trackers.size() 
+                  << ", 失敗: " << failed_trackers.size() << std::endl;
+    }
+    
+    return results;
+}
+
+size_t CSRTManagerNative::get_failed_tracker_count() const {
+    std::lock_guard<std::mutex> lock(recovery_mutex_);
+    return failed_count_;
 }
 
 } // namespace csrt_native

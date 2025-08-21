@@ -16,9 +16,9 @@ from ..models.utils import DEVICE
 from .tracking_manager import TrackingManager
 from .tracking_config import TrackingConfig
 from .exceptions import SAM2InitError, GroundingDINOError
+from .logging_manager import LoggerFactory, create_log_context
 
-# デバッグモード制御（本番環境では False に設定）
-DEBUG_LABELS = True
+# デバッグモード制御は統一ロギングシステムで管理
 
 
 class ModelCoordinator:
@@ -32,9 +32,14 @@ class ModelCoordinator:
     """
     
     def __init__(self, sam_type: str = "sam2.1_hiera_small", 
-                 ckpt_path: Optional[str] = None, device=DEVICE):
+                 ckpt_path: Optional[str] = None, device=DEVICE, debug_mode: bool = False):
         self.sam_type = sam_type
         self.device = device
+        
+        # 統一ロギング初期化
+        LoggerFactory.set_debug_mode(debug_mode)
+        self.logger = LoggerFactory.get_logger("model_coordinator")
+        self.perf_logger = LoggerFactory.get_performance_logger("model_coordinator")
         
         self.sam = self._initialize_sam(sam_type, ckpt_path, device)
         self.gdino = self._initialize_gdino(device)
@@ -51,10 +56,18 @@ class ModelCoordinator:
         - バッチ推論用のメモリ効率最適化
         """
         try:
-            sam = SAM()
-            sam.build_model(sam_type, ckpt_path, device=device)
-            return sam
+            with self.perf_logger.measure_time("sam2_initialization", "ai_model"):
+                sam = SAM()
+                sam.build_model(sam_type, ckpt_path, device=device)
+                
+                context = create_log_context("ai_model", "sam2_init", 
+                                           model_type=sam_type, checkpoint=ckpt_path)
+                self.logger.info("SAM2モデル初期化完了", context)
+                return sam
         except Exception as e:
+            context = create_log_context("ai_model", "sam2_init", 
+                                       model_type=sam_type, error=str(e))
+            self.logger.error("SAM2モデル初期化失敗", context)
             raise SAM2InitError(sam_type, ckpt_path, e)
     
     def _initialize_gdino(self, device) -> GDINO:
@@ -66,10 +79,16 @@ class ModelCoordinator:
         - 自然言語クエリによるゼロショット物体検出実現
         """
         try:
-            gdino = GDINO()
-            gdino.build_model(device=device)
-            return gdino
+            with self.perf_logger.measure_time("gdino_initialization", "ai_model"):
+                gdino = GDINO()
+                gdino.build_model(device=device)
+                
+                context = create_log_context("ai_model", "gdino_init", device=str(device))
+                self.logger.info("GroundingDINOモデル初期化完了", context)
+                return gdino
         except Exception as e:
+            context = create_log_context("ai_model", "gdino_init", error=str(e))
+            self.logger.error("GroundingDINOモデル初期化失敗", context)
             raise GroundingDINOError("initialization", e)
     
     def setup_tracking(self, tracking_targets: List[str], 
@@ -85,7 +104,15 @@ class ModelCoordinator:
         if tracking_config:
             self.tracking_config.update(**tracking_config)
         
+        context = create_log_context("tracking", "setup", 
+                                   targets=tracking_targets, 
+                                   config_provided=tracking_config is not None,
+                                   csrt_params_provided=csrt_params is not None)
+        self.logger.info("トラッキングシステム初期化開始", context)
+        
         self.tracking_manager = TrackingManager(tracking_targets, self.tracking_config, csrt_params)
+        
+        self.logger.info("トラッキングシステム初期化完了", context)
     
     def predict_full_pipeline(
         self,
@@ -108,14 +135,22 @@ class ModelCoordinator:
         - テンソルメモリ管理とCUDA kernel最適化
         """
         
-        gdino_results = self._run_grounding_dino(
-            images_pil, texts_prompt, box_threshold, text_threshold
-        )
-        
-        all_results = []
-        sam_images = []
-        sam_boxes = []
-        sam_indices = []
+        with self.perf_logger.measure_time("full_pipeline", "ai_pipeline"):
+            context = create_log_context("ai_pipeline", "predict_full", 
+                                       num_images=len(images_pil),
+                                       prompts=texts_prompt,
+                                       update_trackers=update_trackers,
+                                       run_sam=run_sam)
+            self.logger.debug("AI推論パイプライン開始", context)
+            
+            gdino_results = self._run_grounding_dino(
+                images_pil, texts_prompt, box_threshold, text_threshold
+            )
+            
+            all_results = []
+            sam_images = []
+            sam_boxes = []
+            sam_indices = []
         
         for idx, result in enumerate(gdino_results):
             result = self._convert_cuda_tensors(result)
@@ -132,10 +167,15 @@ class ModelCoordinator:
             
             all_results.append(processed_result)
         
-        if run_sam and sam_images:
-            self._run_sam_batch_inference(all_results, sam_images, sam_boxes, sam_indices)
-        
-        return all_results
+            if run_sam and sam_images:
+                self._run_sam_batch_inference(all_results, sam_images, sam_boxes, sam_indices)
+            
+            result_context = create_log_context("ai_pipeline", "predict_complete", 
+                                              processed_images=len(all_results),
+                                              sam_processed=len(sam_images))
+            self.logger.debug("AI推論パイプライン完了", result_context)
+            
+            return all_results
     
     def _run_grounding_dino(
         self, images_pil: List[Image.Image], texts_prompt: List[str],
@@ -184,21 +224,25 @@ class ModelCoordinator:
             
             # ラベルとボックスの数が一致することを確認
             if len(boxes) != len(labels):
-                if DEBUG_LABELS:
-                    print(f"[ModelCoordinator] Warning: boxes={len(boxes)}, labels={len(labels)} 不一致")
+                mismatch_context = create_log_context("tracking", "data_validation", 
+                                                    boxes_count=len(boxes), labels_count=len(labels))
+                self.logger.warning("ボックスとラベル数の不一致", mismatch_context)
                 return gdino_result
             
-            # デバッグ: GroundingDINOの検出結果を記録
-            if DEBUG_LABELS:
-                print(f"[ModelCoordinator] GroundingDINO検出: {dict(zip(labels, ['bbox' for _ in labels]))}")
+            # GroundingDINOの検出結果を記録
+            detection_context = create_log_context("tracking", "gdino_detection", 
+                                                  labels=labels, bbox_count=len(boxes))
+            self.logger.debug("GroundingDINO検出結果", detection_context)
             
             self.tracking_manager.initialize_trackers(boxes, labels, image_np)
             
             tracking_result = self.tracking_manager.get_tracking_result()
             
-            # デバッグ: トラッキング結果を記録
-            if DEBUG_LABELS and tracking_result["labels"]:
-                print(f"[ModelCoordinator] トラッキング結果: {tracking_result['labels']}")
+            # トラッキング結果を記録
+            if tracking_result["labels"]:
+                track_context = create_log_context("tracking", "tracking_result", 
+                                                 labels=tracking_result['labels'])
+                self.logger.debug("トラッキング結果取得", track_context)
             
             if tracking_result["boxes"].size > 0:
                 return {
@@ -210,8 +254,8 @@ class ModelCoordinator:
                 return gdino_result
                 
         except Exception as e:
-            if DEBUG_LABELS:
-                print(f"[ModelCoordinator] トラッキング統合エラー: {e}")
+            error_context = create_log_context("tracking", "integration_error", error=str(e))
+            self.logger.error("トラッキング統合エラー", error_context)
             return gdino_result
     
     def _prepare_sam_input(self, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -241,19 +285,25 @@ class ModelCoordinator:
         - ラベルとマスクの順序一致性確保
         """
         try:
-            # デバッグ: SAM入力情報を記録
-            if DEBUG_LABELS:
-                for i, (idx, boxes) in enumerate(zip(sam_indices, sam_boxes)):
-                    labels = all_results[idx].get("labels", [])
-                    print(f"[ModelCoordinator] SAM入力[{i}]: idx={idx}, boxes={len(boxes)}, labels={labels}")
+            # SAM入力情報を記録
+            for i, (idx, boxes) in enumerate(zip(sam_indices, sam_boxes)):
+                labels = all_results[idx].get("labels", [])
+                sam_input_context = create_log_context("ai_model", "sam_input", 
+                                                     batch_idx=i, result_idx=idx, 
+                                                     boxes_count=len(boxes), labels=labels)
+                self.logger.debug("SAM入力データ準備", sam_input_context)
             
             masks, mask_scores, _ = self.sam.predict_batch(sam_images, xyxy=sam_boxes)
             
             # 結果をインデックス順に処理（ラベル順序保持）
             for i, (idx, mask, score) in enumerate(zip(sam_indices, masks, mask_scores)):
-                if DEBUG_LABELS:
-                    labels = all_results[idx].get("labels", [])
-                    print(f"[ModelCoordinator] SAM出力[{i}]: idx={idx}, マスク数={len(mask) if hasattr(mask, '__len__') else 'N/A'}, labels={labels}")
+                labels = all_results[idx].get("labels", [])
+                mask_count = len(mask) if hasattr(mask, '__len__') else 'N/A'
+                
+                sam_output_context = create_log_context("ai_model", "sam_output", 
+                                                      batch_idx=i, result_idx=idx, 
+                                                      mask_count=mask_count, labels=labels)
+                self.logger.debug("SAM出力処理", sam_output_context)
                 
                 all_results[idx].update({
                     "masks": mask,
@@ -261,8 +311,8 @@ class ModelCoordinator:
                 })
                 
         except Exception as e:
-            if DEBUG_LABELS:
-                print(f"[ModelCoordinator] SAM batch推論エラー: {e}")
+            error_context = create_log_context("ai_model", "sam_batch_error", error=str(e))
+            self.logger.error("SAMバッチ推論エラー", error_context)
     
     def update_tracking_only(self, image_np: np.ndarray) -> Dict[str, Any]:
         """高速CSRTトラッキングのみ実行：30Hzリアルタイム処理版
@@ -280,16 +330,18 @@ class ModelCoordinator:
             tracked_boxes = self.tracking_manager.update_all_trackers(image_np)
             if tracked_boxes:
                 result = self.tracking_manager.get_tracking_result()
-                # デバッグ: トラッキング専用モードのラベル確認
-                if DEBUG_LABELS and result["labels"]:
-                    print(f"[ModelCoordinator] Tracking-only結果: {result['labels']}")
+                # トラッキング専用モードの結果確認
+                if result["labels"]:
+                    track_only_context = create_log_context("tracking", "tracking_only", 
+                                                          labels=result['labels'])
+                    self.logger.debug("Tracking-only結果", track_only_context)
                 return result
             else:
                 return self._empty_result()
                 
         except Exception as e:
-            if DEBUG_LABELS:
-                print(f"[ModelCoordinator] Tracking-onlyエラー: {e}")
+            error_context = create_log_context("tracking", "tracking_only_error", error=str(e))
+            self.logger.error("Tracking-onlyエラー", error_context)
             return self._empty_result()
     
     def update_tracking_with_sam(self, image_np: np.ndarray) -> Dict[str, Any]:
@@ -313,9 +365,10 @@ class ModelCoordinator:
             boxes = tracking_result["boxes"]
             labels = tracking_result["labels"]
             
-            # デバッグ: Tracking+SAM入力ラベル確認
-            if DEBUG_LABELS:
-                print(f"[ModelCoordinator] Tracking+SAM入力: boxes={len(boxes)}, labels={labels}")
+            # Tracking+SAM入力ラベル確認
+            track_sam_context = create_log_context("tracking", "track_sam_input", 
+                                                 boxes_count=len(boxes), labels=labels)
+            self.logger.debug("Tracking+SAM入力", track_sam_context)
             
             try:
                 masks, mask_scores, _ = self.sam.predict_batch(
@@ -326,9 +379,10 @@ class ModelCoordinator:
                     masks, mask_scores, len(boxes)
                 )
                 
-                # デバッグ: Tracking+SAM出力確認
-                if DEBUG_LABELS:
-                    print(f"[ModelCoordinator] Tracking+SAM出力: マスク数={len(result_masks)}, labels={labels}")
+                # Tracking+SAM出力確認
+                track_sam_output_context = create_log_context("tracking", "track_sam_output", 
+                                                            mask_count=len(result_masks), labels=labels)
+                self.logger.debug("Tracking+SAM出力", track_sam_output_context)
                 
                 return {
                     "boxes": boxes,
@@ -339,8 +393,8 @@ class ModelCoordinator:
                 }
                 
             except Exception as e:
-                if DEBUG_LABELS:
-                    print(f"[ModelCoordinator] Tracking+SAM SAM処理エラー: {e}")
+                sam_error_context = create_log_context("tracking", "track_sam_error", error=str(e))
+                self.logger.error("Tracking+SAM SAM処理エラー", sam_error_context)
                 return {
                     **tracking_result,
                     "masks": [],

@@ -48,27 +48,18 @@ class LangSAM:
         sam_indices = []
         for idx, result in enumerate(gdino_results):
             result = {k: (v.cpu().numpy() if hasattr(v, "numpy") else v) for k, v in result.items()}
-            processed_result = {
-                **result,
-                "masks": [],
-                "mask_scores": [],
-            }
-
+            result["masks"] = []
+            result["mask_scores"] = []
             if result["labels"]:
                 sam_images.append(np.asarray(images_pil[idx]))
-                sam_boxes.append(processed_result["boxes"])
+                sam_boxes.append(result["boxes"])
                 sam_indices.append(idx)
+            all_results.append(result)
 
-            all_results.append(processed_result)
         if sam_images:
             masks, mask_scores, _ = self.sam.predict_batch(sam_images, xyxy=sam_boxes)
-            for idx, mask, score in zip(sam_indices, masks, mask_scores):
-                all_results[idx].update(
-                    {
-                        "masks": mask,
-                        "mask_scores": score,
-                    }
-                )
+            for idx, sam_idx in enumerate(sam_indices):
+                all_results[sam_idx]["masks"] = masks[idx]
+                all_results[sam_idx]["mask_scores"] = mask_scores[idx]
+
         return all_results
-
-
