@@ -69,11 +69,7 @@ PYBIND11_MODULE(csrt_native, m) {
         .def_readwrite("scale_lr", &csrt_native::CSRTParams::scale_lr)
         .def_readwrite("scale_step", &csrt_native::CSRTParams::scale_step)
         .def_readwrite("psr_threshold", &csrt_native::CSRTParams::psr_threshold)
-        // CSRT復旧機能パラメータ
-        .def_readwrite("enable_recovery", &csrt_native::CSRTParams::enable_recovery)
-        .def_readwrite("buffer_duration", &csrt_native::CSRTParams::buffer_duration)
-        .def_readwrite("time_travel_seconds", &csrt_native::CSRTParams::time_travel_seconds)
-        .def_readwrite("fast_forward_frames", &csrt_native::CSRTParams::fast_forward_frames);
+;
     
     // CSRTTrackerNative
     py::class_<csrt_native::CSRTTrackerNative>(m, "CSRTTrackerNative")
@@ -97,22 +93,6 @@ PYBIND11_MODULE(csrt_native, m) {
         .def("get_tracker_id", &csrt_native::CSRTTrackerNative::get_tracker_id)
         .def("set_params", &csrt_native::CSRTTrackerNative::set_params)
         .def("get_params", &csrt_native::CSRTTrackerNative::get_params)
-        // CSRT復旧機能
-        .def("attempt_recovery", [](csrt_native::CSRTTrackerNative& self, py::array_t<uint8_t> image) -> py::object {
-            cv::Mat mat = numpy_to_mat(image);
-            cv::Rect2d bbox;
-            bool success = self.attempt_recovery(mat, bbox);
-            if (success) {
-                return rect_to_tuple(bbox);
-            }
-            return py::none();
-        })
-        .def("add_frame_to_buffer", [](csrt_native::CSRTTrackerNative& self, py::array_t<uint8_t> image, py::tuple bbox) {
-            cv::Mat mat = numpy_to_mat(image);
-            cv::Rect2d rect = tuple_to_rect(bbox);
-            self.add_frame_to_buffer(mat, rect);
-        })
-        .def("is_recovery_needed", &csrt_native::CSRTTrackerNative::is_recovery_needed)
         .def("reset_failure_count", &csrt_native::CSRTTrackerNative::reset_failure_count);
     
     // CSRTManagerNative
@@ -155,23 +135,9 @@ PYBIND11_MODULE(csrt_native, m) {
         .def("clear_trackers", &csrt_native::CSRTManagerNative::clear_trackers)
         .def("get_tracker_count", &csrt_native::CSRTManagerNative::get_tracker_count)
         .def("get_tracker_labels", &csrt_native::CSRTManagerNative::get_tracker_labels)
-        .def("update_trackers_with_recovery", [](csrt_native::CSRTManagerNative& self, py::array_t<uint8_t> image) -> py::list {
-            cv::Mat mat = numpy_to_mat(image);
-            auto results = self.update_trackers_with_recovery(mat);
-            
-            py::list py_results;
-            for (const auto& rect : results) {
-                py_results.append(rect_to_tuple(rect));
-            }
-            return py_results;
-        })
         .def("set_default_params", &csrt_native::CSRTManagerNative::set_default_params)
         .def("set_tracker_params", &csrt_native::CSRTManagerNative::set_tracker_params)
         .def("set_bbox_min_size", &csrt_native::CSRTManagerNative::set_bbox_min_size)
         .def("set_bbox_margin", &csrt_native::CSRTManagerNative::set_bbox_margin)
-        // CSRT復旧機能管理
-        .def("enable_recovery_mode", &csrt_native::CSRTManagerNative::enable_recovery_mode)
-        .def("is_recovery_enabled", &csrt_native::CSRTManagerNative::is_recovery_enabled)
-        .def("get_failed_tracker_count", &csrt_native::CSRTManagerNative::get_failed_tracker_count)
-        .def("get_recovered_tracker_count", &csrt_native::CSRTManagerNative::get_recovered_tracker_count);
+;
 }

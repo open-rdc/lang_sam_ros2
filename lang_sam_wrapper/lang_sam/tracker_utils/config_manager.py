@@ -100,11 +100,6 @@ class TrackingConfig:
     bbox_margin: int = 5
     bbox_min_size: int = 3
     tracker_min_size: int = 3
-    enable_csrt_recovery: bool = True
-    frame_buffer_duration: float = 5.0
-    time_travel_seconds: float = 1.0
-    fast_forward_frames: int = 10
-    recovery_attempt_frames: int = 1
     
     def validate(self) -> None:
         """設定値検証"""
@@ -114,8 +109,6 @@ class TrackingConfig:
             raise ConfigurationError("bbox_min_size", self.bbox_min_size, "must be positive")
         if self.tracker_min_size <= 0:
             raise ConfigurationError("tracker_min_size", self.tracker_min_size, "must be positive")
-        if self.frame_buffer_duration <= 0:
-            raise ConfigurationError("frame_buffer_duration", self.frame_buffer_duration, "must be positive")
 
 
 @dataclass
@@ -387,11 +380,6 @@ class ConfigManager:
         track_config.bbox_margin = int(params.get('bbox_margin', track_config.bbox_margin))
         track_config.bbox_min_size = int(params.get('bbox_min_size', track_config.bbox_min_size))
         track_config.tracker_min_size = int(params.get('tracker_min_size', track_config.tracker_min_size))
-        track_config.enable_csrt_recovery = params.get('enable_csrt_recovery', track_config.enable_csrt_recovery)
-        track_config.frame_buffer_duration = float(params.get('frame_buffer_duration', track_config.frame_buffer_duration))
-        track_config.time_travel_seconds = float(params.get('time_travel_seconds', track_config.time_travel_seconds))
-        track_config.fast_forward_frames = int(params.get('fast_forward_frames', track_config.fast_forward_frames))
-        track_config.recovery_attempt_frames = int(params.get('recovery_attempt_frames', track_config.recovery_attempt_frames))
     
     def _load_csrt_config(self, csrt_config: CSRTConfig, params: Dict[str, Any]):
         """CSRT設定読み込み（プレフィックス除去対応）"""

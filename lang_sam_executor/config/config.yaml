@@ -8,7 +8,7 @@ lang_sam_tracker_node:
     tracking_targets: ["white line", "red pylon", "human", "car"]  # CSRT追跡対象
     
     # ===== 実行周波数設定 =====
-    gdino_interval_seconds: 1.0  # GroundingDINO実行間隔（1.0秒 = 1Hz）
+    gdino_interval_seconds: 2.0  # GroundingDINO実行間隔（1.0秒 = 1Hz）
     
     # ===== ROS2トピック設定 =====
     input_topic: "/zed/zed_node/rgb/image_rect_color"  # 入力画像（ZEDカメラ）
@@ -21,12 +21,6 @@ lang_sam_tracker_node:
     bbox_min_size: 3               # 最小BoundingBoxサイズ（ピクセル）- 小さなBBOXも許可
     tracker_min_size: 3            # トラッカー継続最小サイズ（ピクセル）- 小さなBBOXも継続
     
-    # ===== CSRTフレーム機能設定 =====
-    enable_csrt_recovery: true           # CSRT復旧機能統合有効化（バッファ・時間遡行・早送り）
-    frame_buffer_duration: 5.0          # フレームバッファ保持時間（秒）
-    time_travel_seconds: 3.0            # さかのぼり時間（秒）
-    fast_forward_frames: 10             # 早送り処理フレーム数（計算負荷制御）
-    recovery_attempt_frames: 1          # 復旧処理で使用する最新フレーム数（ノイズ回避）
     
     # ===== CSRTトラッカー内部パラメータ =====
     # デフォルト値は速度重視設定。精度向上時はHOG/グレースケール/セグメンテーション有効化

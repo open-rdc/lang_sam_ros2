@@ -12,7 +12,6 @@ from .exceptions import (
 from .tracking_config import TrackingConfig
 from .csrt_tracker import CSRTTracker
 from .tracking_manager import TrackingManager
-from .frame_buffer import CSRTFrameBuffer, CSRTFrameManager
 from .model_coordinator import ModelCoordinator
 from .lang_sam_tracker import LangSAMTracker
 
@@ -30,8 +29,6 @@ __all__ = [
     'TrackingConfig',
     'CSRTTracker', 
     'TrackingManager',
-    'CSRTFrameBuffer',
-    'CSRTFrameManager',
     
     # 統合機能
     'ModelCoordinator',

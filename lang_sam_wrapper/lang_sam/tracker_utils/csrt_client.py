@@ -73,11 +73,6 @@ class CSRTClient:
             'csrt_scale_lr': (params.scale_lr, float),
             'csrt_scale_step': (params.scale_step, float),
             'csrt_psr_threshold': (params.psr_threshold, float),
-            # CSRT復旧機能パラメータ
-            'enable_csrt_recovery': (params.enable_recovery, bool),
-            'frame_buffer_duration': (params.buffer_duration, float),
-            'time_travel_seconds': (params.time_travel_seconds, float),
-            'fast_forward_frames': (params.fast_forward_frames, int),
         }
         
         for param_name, (default_value, param_type) in param_mapping.items():
@@ -128,11 +123,6 @@ class CSRTClient:
         self.logger.info(f"scale_lr: {self.params.scale_lr}")
         self.logger.info(f"scale_step: {self.params.scale_step}")
         self.logger.info(f"psr_threshold: {self.params.psr_threshold}")
-        self.logger.info("=== CSRT復旧機能パラメータ ===")
-        self.logger.info(f"enable_recovery: {self.params.enable_recovery}")
-        self.logger.info(f"buffer_duration: {self.params.buffer_duration}")
-        self.logger.info(f"time_travel_seconds: {self.params.time_travel_seconds}")
-        self.logger.info(f"fast_forward_frames: {self.params.fast_forward_frames}")
         self.logger.info("=== End CSRT Parameters ===")
     
     def update_parameters_from_ros(self):
@@ -186,26 +176,6 @@ class CSRTClient:
             self.logger.error(f"Error in C++ tracker update: {e}")
             return []
     
-    def update_trackers_with_recovery(self, image: np.ndarray):
-        """Update all trackers using C++ CSRT with recovery functionality"""
-        if not self.manager:
-            return []
-            
-        try:
-            # 復旧機能付き更新を使用
-            if hasattr(self.manager, 'update_trackers_with_recovery'):
-                results = self.manager.update_trackers_with_recovery(image)
-                # Cache labels immediately after update
-                self._cached_labels = self.manager.get_tracker_labels() if results else []
-                self.logger.debug(f"[CSRTClient] C++ CSRT復旧機能更新 {len(results)} trackers with labels: {self._cached_labels}")
-                return results
-            else:
-                # フォールバック: 通常の更新
-                return self.update_trackers(image)
-            
-        except Exception as e:
-            self.logger.error(f"Error in C++ tracker recovery update: {e}")
-            return []
     
     def clear_trackers(self):
         """Clear all trackers"""
@@ -231,20 +201,6 @@ class CSRTClient:
             return labels
         return []
     
-    def get_recovery_stats(self) -> dict:
-        """Get recovery statistics from C++ manager"""
-        if not self.manager:
-            return {'recovered': 0, 'failed': 0, 'recovery_enabled': False}
-            
-        try:
-            return {
-                'recovered': getattr(self.manager, 'get_recovered_tracker_count', lambda: 0)(),
-                'failed': getattr(self.manager, 'get_failed_tracker_count', lambda: 0)(),
-                'recovery_enabled': getattr(self.manager, 'is_recovery_enabled', lambda: False)()
-            }
-        except Exception as e:
-            self.logger.debug(f"Recovery stats error: {e}")
-            return {'recovered': 0, 'failed': 0, 'recovery_enabled': False}
     
     def is_available(self) -> bool:
         """Check if native C++ extension is available"""
