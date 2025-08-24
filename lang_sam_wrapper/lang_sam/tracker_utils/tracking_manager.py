@@ -85,16 +85,7 @@ class TrackingManager:
         return False
     
     def _process_bbox(self, box: np.ndarray, width: int, height: int) -> Optional[Tuple[int, int, int, int]]:
-        """バウンディングボックス座標の正規化とロバスト検証
-        
-        技術的処理：
-        1. 正規化座標[0-1]→ピクセル座標変換
-        2. 異なるBBoxフォーマットの自動検出と対応
-        3. 画像境界内への安全なクリッピング
-        4. 最小サイズ制約とマージン適用
-        
-        耐故障性：異常座標値や破損データに対する安全なハンドリング
-        """
+        """バウンディングボックス座標の正規化とロバスト検証"""
         try:
             if len(box) < 4:
                 return None
@@ -137,130 +128,35 @@ class TrackingManager:
         return width >= self.config.bbox_min_size and height >= self.config.bbox_min_size
     
     def update_all_trackers(self, image: np.ndarray) -> Dict[str, List[float]]:
-        """全CSRTトラッカーの一括更新と失敗管理
-        
-        技術的処理フロー：
-        1. 各トラッカーでの相関フィルタベースマッチング
-        2. 新しいフレームでの物体位置推定
-        3. 追跡信頼度スコアの継続評価
-        4. 失敗トラッカーの自動検出と除去
-        5. アクティブトラッカーの結果集約
-        
-        パフォーマンス特性：
-        - 30Hzフレームレートでの安定動作を保証
-        - CPUベースでの軽量・高速処理
-        """
-        if not self.trackers:
-            return {}
-        
-        height, width = image.shape[:2]
+        """全CSRTトラッカーの一括更新と失敗管理"""
+        updated_boxes = {}
         failed_trackers = []
         
-        for tracker_id, tracker in list(self.trackers.items()):
-            if not self._update_single_tracker(tracker_id, tracker, image, width, height):
+        for tracker_id, tracker in self.trackers.items():
+            bbox = tracker.update(image)
+            if bbox is not None and tracker.is_tracking():
+                updated_boxes[tracker_id] = list(bbox)
+                self.tracked_boxes[tracker_id] = list(bbox)
+            else:
                 failed_trackers.append(tracker_id)
         
-        self._remove_failed_trackers(failed_trackers)
-        return self.tracked_boxes.copy()
-    
-    def _update_single_tracker(self, tracker_id: str, tracker: CSRTTracker, 
-                              image: np.ndarray, width: int, height: int) -> bool:
-        """単一トラッカー更新処理"""
-        try:
-            updated_bbox = tracker.update(image)
-            if updated_bbox is None:
-                return False
-            
-            if self._is_bbox_outside_image(updated_bbox, width, height):
-                return False
-            
-            clipped_bbox = self._clip_bbox_to_image(updated_bbox, width, height)
-            if not self._validate_clipped_bbox(clipped_bbox):
-                return False
-            
-            self.tracked_boxes[tracker_id] = list(clipped_bbox)
-            return True
-            
-        except CSRTTrackingError:
-            return False
-    
-    def _remove_failed_trackers(self, failed_trackers: List[str]) -> None:
-        """失敗したトラッカー削除"""
+        # 失敗したトラッカーを削除
         for tracker_id in failed_trackers:
-            self._remove_tracker(tracker_id)
-    
-    def _clip_bbox_to_image(self, bbox: Tuple[int, int, int, int], 
-                           width: int, height: int) -> Tuple[int, int, int, int]:
-        """画像境界内BoundingBoxクリッピング"""
-        x1, y1, x2, y2 = bbox
-        x1_clipped = max(0, min(x1, width - 1))
-        y1_clipped = max(0, min(y1, height - 1))
-        x2_clipped = max(x1_clipped + 1, min(x2, width))
-        y2_clipped = max(y1_clipped + 1, min(y2, height))
-        return (x1_clipped, y1_clipped, x2_clipped, y2_clipped)
-    
-    def _validate_clipped_bbox(self, bbox: Tuple[int, int, int, int]) -> bool:
-        """クリップ後BoundingBox検証"""
-        x1, y1, x2, y2 = bbox
-        width = x2 - x1
-        height = y2 - y1
-        return width > self.config.tracker_min_size and height > self.config.tracker_min_size
-    
-    def _is_bbox_outside_image(self, bbox: Tuple[int, int, int, int], 
-                              width: int, height: int) -> bool:
-        """バウンディングボックスが完全に画角外かどうか判定"""
-        x1, y1, x2, y2 = bbox
-        return (x2 <= 0 or x1 >= width or y2 <= 0 or y1 >= height)
-    
-    def _remove_tracker(self, tracker_id: str) -> None:
-        """トラッカー削除"""
-        self.trackers.pop(tracker_id, None)
-        self.tracked_boxes.pop(tracker_id, None)
+            del self.trackers[tracker_id]
+            if tracker_id in self.tracked_boxes:
+                del self.tracked_boxes[tracker_id]
+        
+        return updated_boxes
     
     def clear_trackers(self) -> None:
-        """全トラッカー状態クリア"""
+        """全トラッカークリア"""
         self.trackers.clear()
         self.tracked_boxes.clear()
     
-    def get_tracking_result(self) -> Dict[str, Any]:
-        """追跡結果取得（順序保持とラベル正確性確保）"""
-        if not self.tracked_boxes:
-            return {
-                "boxes": np.array([]),
-                "labels": [],
-                "scores": np.array([])
-            }
-        
-        # トラッカーIDでソートして順序を安定化
-        sorted_items = sorted(self.tracked_boxes.items())
-        
-        boxes = []
-        labels = []
-        
-        for tracker_id, bbox in sorted_items:
-            boxes.append(bbox)
-            
-            # ラベル名を正確に抽出（番号部分を除去）
-            if '_' in tracker_id:
-                # 最後の '_数字' を除去
-                parts = tracker_id.split('_')
-                if len(parts) >= 2 and parts[-1].isdigit():
-                    label = '_'.join(parts[:-1])
-                else:
-                    label = tracker_id
-            else:
-                label = tracker_id
-            
-            labels.append(label)
-        
-        scores = np.ones(len(boxes))
-        
-        return {
-            "boxes": np.array(boxes) if boxes else np.array([]),
-            "labels": labels,
-            "scores": scores
-        }
+    def get_active_trackers(self) -> Dict[str, List[float]]:
+        """アクティブトラッカー取得"""
+        return self.tracked_boxes.copy()
     
-    def has_active_trackers(self) -> bool:
-        """アクティブトラッカー存在確認"""
-        return len(self.trackers) > 0
+    def get_tracker_count(self) -> int:
+        """トラッカー数取得"""
+        return len(self.trackers)

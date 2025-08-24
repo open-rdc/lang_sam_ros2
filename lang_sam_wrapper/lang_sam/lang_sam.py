@@ -18,48 +18,58 @@ class LangSAM:
     def predict(
         self,
         images_pil: list[Image.Image],
-        texts_prompt: list[str],
+        text_prompt: str,
         box_threshold: float = 0.3,
         text_threshold: float = 0.25,
-    ):
-        """Predicts masks for given images and text prompts using GDINO and SAM models.
-
-        Parameters:
-            images_pil (list[Image.Image]): List of input images.
-            texts_prompt (list[str]): List of text prompts corresponding to the images.
-            box_threshold (float): Threshold for box predictions.
-            text_threshold (float): Threshold for text predictions.
-
-        Returns:
-            list[dict]: List of results containing masks and other outputs for each image.
-            Output format:
-            [{
-                "boxes": np.ndarray,
-                "scores": np.ndarray,
-                "masks": np.ndarray,
-                "mask_scores": np.ndarray,
-            }, ...]
+    ) -> list[dict]:
         """
-
-        gdino_results = self.gdino.predict(images_pil, texts_prompt, box_threshold, text_threshold)
-        all_results = []
-        sam_images = []
-        sam_boxes = []
-        sam_indices = []
-        for idx, result in enumerate(gdino_results):
-            result = {k: (v.cpu().numpy() if hasattr(v, "numpy") else v) for k, v in result.items()}
-            result["masks"] = []
-            result["mask_scores"] = []
-            if result["labels"]:
-                sam_images.append(np.asarray(images_pil[idx]))
-                sam_boxes.append(result["boxes"])
-                sam_indices.append(idx)
-            all_results.append(result)
-
-        if sam_images:
-            masks, mask_scores, _ = self.sam.predict_batch(sam_images, xyxy=sam_boxes)
-            for idx, sam_idx in enumerate(sam_indices):
-                all_results[sam_idx]["masks"] = masks[idx]
-                all_results[sam_idx]["mask_scores"] = mask_scores[idx]
-
-        return all_results
+        Predict detections and generate masks for given images and text prompt.
+        
+        Args:
+            images_pil: List of PIL Images
+            text_prompt: Text description of objects to detect
+            box_threshold: Detection confidence threshold
+            text_threshold: Text matching confidence threshold
+            
+        Returns:
+            List of dictionaries containing detection results for each image
+        """
+        results = []
+        
+        for image_pil in images_pil:
+            # GroundingDINO detection
+            detections = self.gdino.predict(
+                image_pil, text_prompt, box_threshold, text_threshold
+            )
+            
+            if len(detections) == 0:
+                results.append({
+                    "masks": np.array([]),
+                    "boxes": np.array([]).reshape(0, 4),
+                    "labels": [],
+                    "scores": np.array([])
+                })
+                continue
+                
+            # Convert to format expected by SAM2
+            boxes = []
+            labels = []
+            scores = []
+            
+            for detection in detections:
+                x, y, w, h = detection.x, detection.y, detection.width, detection.height
+                boxes.append([x, y, x + w, y + h])
+                labels.append(detection.label)
+                scores.append(detection.score)
+            
+            # SAM2 segmentation
+            masks = self.sam.predict(image_pil, boxes)
+            
+            results.append({
+                "masks": masks,
+                "boxes": np.array(boxes),
+                "labels": labels,
+                "scores": np.array(scores)
+            })
+            
+        return results

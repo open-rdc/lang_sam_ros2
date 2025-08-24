@@ -18,6 +18,7 @@ from lang_sam.tracker_utils.csrt_client import CSRTClient
 from lang_sam.tracker_utils.config_manager import ConfigManager
 from lang_sam.tracker_utils.logging_manager import setup_logging_for_ros_node
 from lang_sam.utils import draw_image
+from lang_sam_wrapper.fast_processing_client import get_fast_processing_client
 
 
 class Detection:
@@ -56,6 +57,10 @@ class LangSAMTrackerNode(Node):
         # Initialize CV Bridge
         self.cv_bridge = CvBridge()
         
+        # Initialize Fast Processing Client
+        self.fast_client = get_fast_processing_client()
+        self.logger.info("高速化処理クライアント初期化完了")
+        
         # Initialize LangSAM tracker
         if self.system_config:
             sam_model = self.system_config.model.sam_model
@@ -85,19 +90,22 @@ class LangSAMTrackerNode(Node):
             bbox_min_size = self.bbox_min_size
             
         # Initialize native C++ CSRT client
+        self.logger.info("C++ CSRTクライアント初期化開始")
         self.csrt_client = CSRTClient(self)
         
         if not self.csrt_client.is_available():
             self.logger.error("ネイティブC++ CSRT拡張が利用できません、終了します")
-            return
+            raise RuntimeError("C++ CSRT initialization failed")
             
         self.logger.info("ネイティブC++ CSRTクライアント初期化完了")
         
         # Initialize LangSAM tracker
+        self.logger.info("LangSAMトラッカー初期化開始")
         self.lang_sam_tracker = LangSAMTracker(
             sam_type=sam_model,
             device=str(DEVICE)
         )
+        self.logger.info("LangSAMトラッカー初期化完了")
         
         # Store configuration
         self.text_prompt = text_prompt
@@ -108,9 +116,23 @@ class LangSAMTrackerNode(Node):
         self.bbox_margin = bbox_margin
         self.bbox_min_size = bbox_min_size
         
+        # SAM2独立実行用設定
+        if self.system_config and hasattr(self.system_config.execution, 'sam2_interval_seconds'):
+            self.sam2_interval_seconds = self.system_config.execution.sam2_interval_seconds
+            self.sam2_independent_mode = self.system_config.execution.sam2_independent_mode
+        else:
+            self.sam2_interval_seconds = 0.1  # デフォルト10Hz
+            self.sam2_independent_mode = True
+        
         # Timing control
         self.last_gdino_time = 0.0
+        self.last_sam2_time = 0.0  # SAM2独立タイマー
         self.frame_count = 0
+        
+        # CSRTトラッキング結果のキャッシュ（SAM2独立実行用）
+        self.cached_csrt_results = []
+        self.cached_csrt_labels = []
+        self.cached_image = None
         
         # Publishers
         self.gdino_pub = self.create_publisher(Image, gdino_topic, 10)
@@ -118,17 +140,24 @@ class LangSAMTrackerNode(Node):
         self.sam_pub = self.create_publisher(Image, sam_topic, 10)
         
         # Subscriber
+        self.logger.info(f"画像サブスクリプション作成開始: {input_topic}")
         self.image_sub = self.create_subscription(
             Image,
             input_topic,
             self.image_callback,
             10
         )
+        self.logger.info(f"画像サブスクリプション作成完了: {input_topic}")
         
         # Current tracking state
         self.current_detection_labels = []
         
-        self.logger.info("LangSAMトラッカーノード初期化完了（同期処理版）")
+        self.logger.info("LangSAMトラッカーノード初期化完了（同期処理版 + C++高速化）")
+        
+        # 高速化統計情報をログ出力
+        stats = self.fast_client.get_async_stats()
+        self.logger.info(f"高速化統計: ワーカー={stats['active_workers']}, "
+                        f"キャッシュ={stats['cache_size']}")
     
     def _declare_parameters(self):
         """Declare parameters (fallback)"""
@@ -168,14 +197,21 @@ class LangSAMTrackerNode(Node):
     
     def image_callback(self, msg: Image):
         """同期画像処理コールバック"""
-        with self.error_ctx.handle_errors("image_processing", "ros_callback", reraise=False):
+        self.logger.info(f"画像コールバック開始: フレーム{self.frame_count + 1}")
+        
+        try:
             # Convert ROS image to OpenCV
             image = self.cv_bridge.imgmsg_to_cv2(msg, 'bgr8')
             current_time = time.time()
             self.frame_count += 1
             
+            # 画像をキャッシュ（SAM2独立実行用）
+            self.cached_image = image.copy()
+            
             # GroundingDINO検出（同期処理）
             should_run_gdino = (current_time - self.last_gdino_time) >= self.gdino_interval_seconds
+            
+            self.logger.debug(f"GDINO判定: current={current_time:.3f}, last={self.last_gdino_time:.3f}, interval={self.gdino_interval_seconds}, should_run={should_run_gdino}")
             
             if should_run_gdino:
                 self.logger.info(f"フレーム{self.frame_count}: GroundingDINO同期検出開始")
@@ -192,25 +228,40 @@ class LangSAMTrackerNode(Node):
             
             # CSRTトラッキング処理（常に実行）
             self._process_csrt_tracking(image, msg.header)
+            
+            # SAM2セグメンテーション（独立実行モード）
+            if self.sam2_independent_mode:
+                should_run_sam2 = (current_time - self.last_sam2_time) >= self.sam2_interval_seconds
+                if should_run_sam2 and self.cached_csrt_results:
+                    self.logger.debug(f"フレーム{self.frame_count}: SAM2独立実行 (10Hz)")
+                    self._process_sam_segmentation_independent(image, msg.header)
+                    self.last_sam2_time = current_time
+        
+        except Exception as e:
+            self.logger.error(f"画像コールバックエラー: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _run_grounding_dino_detection(self, image: np.ndarray) -> list:
         """GroundingDINO同期検出実行"""
         try:
             from PIL import Image as PILImage
+            import cv2
             
-            # 画像変換
-            pil_image = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+            # C++高速BGR→RGB変換（キャッシュあり）
+            rgb_image = self.fast_client.bgr_to_rgb_cached(image)
+            pil_image = PILImage.fromarray(rgb_image)
             
             start_time = time.time()
             
-            # GroundingDINO推論実行
+            # GroundingDINO推論実行（元のPython実装で動作確認）
             results = self.lang_sam_tracker.predict_with_tracking(
                 images_pil=[pil_image],
                 texts_prompt=[self.text_prompt],
                 box_threshold=self.box_threshold,
                 text_threshold=self.text_threshold,
                 update_trackers=False,
-                run_sam=True
+                run_sam=False
             )
             
             processing_time = time.time() - start_time
@@ -274,17 +325,25 @@ class LangSAMTrackerNode(Node):
             # CSRTラベル取得
             tracker_labels = self.csrt_client.get_cached_labels()
             
+            # CSRT結果をキャッシュ（SAM2独立実行用）
+            self.cached_csrt_results = csrt_results.copy()
+            self.cached_csrt_labels = tracker_labels.copy()
+            
             # CSRT可視化生成・配信
             self._publish_csrt_visualization(csrt_results, tracker_labels, image, header)
             
-            # SAM2セグメンテーション
-            self._process_sam_segmentation(csrt_results, tracker_labels, image, header)
+            # SAM2セグメンテーション（非独立モード時のみ）
+            if not self.sam2_independent_mode:
+                self._process_sam_segmentation(csrt_results, tracker_labels, image, header)
         else:
-            # トラッカーなし、空画像配信
+            # トラッカーなし
+            self.cached_csrt_results = []
+            self.cached_csrt_labels = []
+            # 空画像配信
             self._publish_empty_images(image, header)
     
     def _publish_gdino_visualization(self, detections: list, image: np.ndarray, header):
-        """GroundingDINO可視化配信"""
+        """GroundingDINO可視化配信（高速化版）"""
         try:
             if not detections:
                 # 検出なしの場合は元画像をそのまま配信
@@ -295,24 +354,27 @@ class LangSAMTrackerNode(Node):
             
             # draw_image用データ準備
             xyxy = []
-            labels = []
-            probs = []
+            labels_list = []
             
             for detection in detections:
-                x1, y1 = detection.x, detection.y
-                x2, y2 = x1 + detection.width, y1 + detection.height
-                xyxy.append([x1, y1, x2, y2])
-                labels.append(detection.label)
-                probs.append(detection.score)
+                x, y, w, h = detection.x, detection.y, detection.width, detection.height
+                xyxy.append([x, y, x + w, y + h])
+                labels_list.append(detection.label)
             
             # draw_imageで可視化
-            gdino_img = draw_image(
-                image_rgb=image,
-                masks=None,
-                xyxy=np.array(xyxy),
-                probs=probs,
-                labels=labels
-            )
+            from lang_sam.utils import draw_image
+            if xyxy and labels_list:
+                # probsを適切に生成
+                probs = [1.0] * len(xyxy)
+                gdino_img = draw_image(
+                    image_rgb=image,
+                    masks=[],    # 空のリストを渡す  
+                    xyxy=xyxy,
+                    probs=probs,     # 確率値を渡す
+                    labels=labels_list
+                )
+            else:
+                gdino_img = image.copy()  # 検出なしの場合は元画像
             
             # ROS配信
             gdino_msg = self.cv_bridge.cv2_to_imgmsg(gdino_img, 'bgr8')
@@ -339,11 +401,14 @@ class LangSAMTrackerNode(Node):
                 xyxy.append([x, y, x + w, y + h])
             
             # draw_imageで可視化
+            from lang_sam.utils import draw_image
+            # probsを適切に生成
+            probs = [1.0] * len(xyxy)
             csrt_img = draw_image(
                 image_rgb=image,
-                masks=None,
-                xyxy=np.array(xyxy),
-                probs=[1.0] * len(xyxy),
+                masks=[],  # 空のリストを渡す
+                xyxy=xyxy,
+                probs=probs,   # 確率値を渡す
                 labels=labels[:len(xyxy)]
             )
             
@@ -496,6 +561,49 @@ class LangSAMTrackerNode(Node):
             self.logger.warning(f"ボックス可視化エラー: {e}")
             return image
     
+    def _process_sam_segmentation_independent(self, image: np.ndarray, header):
+        """SAM2独立実行処理（CSRTトラッキング結果を使用）"""
+        try:
+            if not self.cached_csrt_results:
+                # トラッキング結果なし、元画像配信
+                sam_msg = self.cv_bridge.cv2_to_imgmsg(image, 'bgr8')
+                sam_msg.header = header
+                self.sam_pub.publish(sam_msg)
+                return
+            
+            # SAM2推論実行
+            from PIL import Image as PILImage
+            pil_image = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+            
+            # キャッシュされたCSRTバウンディングボックスを使用
+            boxes = []
+            for bbox in self.cached_csrt_results:
+                x, y, w, h = bbox
+                boxes.append([x, y, x + w, y + h])
+            
+            if boxes:
+                # SAM2セグメンテーション実行
+                sam_img = self._run_sam2_segmentation(image, pil_image, boxes, self.cached_csrt_labels)
+                
+                # ROS配信
+                sam_msg = self.cv_bridge.cv2_to_imgmsg(sam_img, 'bgr8')
+                sam_msg.header = header
+                self.sam_pub.publish(sam_msg)
+                
+                self.logger.debug(f"SAM2独立実行完了: {len(boxes)}オブジェクト")
+            else:
+                # ボックスなし、元画像配信
+                sam_msg = self.cv_bridge.cv2_to_imgmsg(image, 'bgr8')
+                sam_msg.header = header
+                self.sam_pub.publish(sam_msg)
+                
+        except Exception as e:
+            self.logger.warning(f"SAM2独立実行エラー: {e}")
+            # エラー時は元画像を配信
+            sam_msg = self.cv_bridge.cv2_to_imgmsg(image, 'bgr8')
+            sam_msg.header = header
+            self.sam_pub.publish(sam_msg)
+    
     def _publish_empty_images(self, image: np.ndarray, header):
         """トラッカーなし時の空画像配信"""
         # 元画像をそのまま全トピックに配信
@@ -503,7 +611,9 @@ class LangSAMTrackerNode(Node):
         image_msg.header = header
         
         self.csrt_pub.publish(image_msg)
-        self.sam_pub.publish(image_msg)
+        # SAM画像（非独立モード時のみ）
+        if not self.sam2_independent_mode:
+            self.sam_pub.publish(image_msg)
     
     def __del__(self):
         """デストラクタ"""

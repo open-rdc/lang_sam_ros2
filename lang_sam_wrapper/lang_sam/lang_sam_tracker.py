@@ -21,11 +21,11 @@ __all__ = [
     'LangSAMTracker',
     
     # 例外クラス
-    'LangSAMError', 'ModelError', 'TrackingError', 
-    'SAM2InitError', 'GroundingDINOError', 'CSRTTrackingError', 
+    'LangSAMError', 'ModelError', 'TrackingError',
+    'SAM2InitError', 'GroundingDINOError', 'CSRTTrackingError',
     'ErrorHandler',
     
-    # トラッキング機能
+    # トラッキング機能  
     'TrackingConfig', 'CSRTTracker', 'TrackingManager',
     
     # AIモデルコーディネーター

@@ -27,7 +27,7 @@ __all__ = [
     
     # トラッキング機能
     'TrackingConfig',
-    'CSRTTracker', 
+    'CSRTTracker',
     'TrackingManager',
     
     # 統合機能
