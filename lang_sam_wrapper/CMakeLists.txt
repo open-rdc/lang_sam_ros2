@@ -34,10 +34,9 @@ add_library(csrt_native MODULE
   csrt_cpp/python_bindings.cpp
 )
 
-# Create pybind11 module for fast processing
+# Create pybind11 module for fast processing (sync only)
 add_library(fast_processing MODULE
   csrt_cpp/image_processor.cpp
-  csrt_cpp/async_processor.cpp
   csrt_cpp/fast_bindings.cpp
 )
 

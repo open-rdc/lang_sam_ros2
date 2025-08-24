@@ -12,7 +12,7 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import time
 
-from lang_sam.lang_sam_tracker import LangSAMTracker
+from lang_sam.tracker_utils.lang_sam_tracker import LangSAMTracker
 from lang_sam.models.utils import DEVICE
 from lang_sam.tracker_utils.csrt_client import CSRTClient
 from lang_sam.tracker_utils.config_manager import ConfigManager
@@ -155,9 +155,8 @@ class LangSAMTrackerNode(Node):
         self.logger.info("LangSAMトラッカーノード初期化完了（同期処理版 + C++高速化）")
         
         # 高速化統計情報をログ出力
-        stats = self.fast_client.get_async_stats()
-        self.logger.info(f"高速化統計: ワーカー={stats['active_workers']}, "
-                        f"キャッシュ={stats['cache_size']}")
+        cache_size = self.fast_client.get_cache_size()
+        self.logger.info(f"高速化統計: キャッシュサイズ={cache_size}")
     
     def _declare_parameters(self):
         """Declare parameters (fallback)"""
