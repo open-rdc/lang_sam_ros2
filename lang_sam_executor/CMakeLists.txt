@@ -5,8 +5,35 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+# C++ standard
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(OpenCV REQUIRED)
+
+# Build multi_view_node executable
+add_executable(multi_view_node src/multi_view_node.cpp)
+
+# Link libraries
+target_link_libraries(multi_view_node ${OpenCV_LIBS})
+
+# Specify dependencies
+ament_target_dependencies(multi_view_node
+  rclcpp
+  sensor_msgs
+  cv_bridge
+  OpenCV
+)
+
+# Install executables
+install(TARGETS multi_view_node
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 # Install launch files
 install(DIRECTORY launch/

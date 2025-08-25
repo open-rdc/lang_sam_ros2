@@ -126,11 +126,11 @@ class MultiViewParameterManager(ParameterManager):
     
     def get_parameter_definitions(self) -> Dict[str, Dict[str, Any]]:
         return {
-            # 入力トピック設定
-            'original_topic': {'default': '/zed/zed_node/rgb/image_rect_color', 'description': 'ZED生画像トピック'},
-            'gdino_topic': {'default': '/image_gdino', 'description': 'GroundingDINO結果トピック'},
-            'csrt_output_topic': {'default': '/image_csrt', 'description': 'CSRT結果トピック'},
-            'sam_topic': {'default': '/image_sam', 'description': 'SAM2結果トピック'},
+            # 4分割画像配置設定
+            'upper_left_topic': {'default': '/zed/zed_node/rgb/image_rect_color', 'description': '左上の画像トピック'},
+            'upper_right_topic': {'default': '/image_gdino', 'description': '右上の画像トピック'},
+            'lower_left_topic': {'default': '/image_csrt', 'description': '左下の画像トピック'},
+            'lower_right_topic': {'default': '/image_sam', 'description': '右下の画像トピック'},
             
             # 4分割画像出力設定
             'output_fps': {'default': 30.0, 'description': '統合画像配信周波数'},

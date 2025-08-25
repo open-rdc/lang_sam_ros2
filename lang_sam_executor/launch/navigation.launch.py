@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Launch file for LangSAM with Native C++ CSRT Tracker
+Navigation Launch file for Lane Following and Multi-view
+Separated from main LangSAM tracking system
 """
 
 import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration
 from launch.conditions import IfCondition
 from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
@@ -30,48 +30,44 @@ def generate_launch_description():
         description='Path to configuration file'
     )
     
+    enable_nav_arg = DeclareLaunchArgument(
+        'enable_navigation',
+        default_value='true',
+        description='Enable lane following navigation node'
+    )
     
-    # Main LangSAM tracker node (with C++ CSRT)
-    lang_sam_node = Node(
-        package='lang_sam_wrapper',
-        executable='lang_sam_tracker_node.py',
-        name='lang_sam_tracker_node',
+    enable_multiview_arg = DeclareLaunchArgument(
+        'enable_multiview',
+        default_value='true',
+        description='Enable multi-view visualization node'
+    )
+    
+    # Lane following navigation node (conditional)
+    lane_following_node = Node(
+        package='lang_sam_nav',
+        executable='lane_following_node',
+        name='lane_following_node',
         parameters=[LaunchConfiguration('config')],
         output='screen',
         emulate_tty=True,
         arguments=['--ros-args', '--log-level', 'info'] if not LaunchConfiguration('debug') else ['--ros-args', '--log-level', 'debug'],
         respawn=True,
-        respawn_delay=5.0
+        respawn_delay=3.0,
+        condition=IfCondition(LaunchConfiguration('enable_navigation'))
     )
-    
-    # Multi-view visualization node (C++ implementation)
-    multi_view_node = Node(
-        package='lang_sam_executor',
-        executable='multi_view_node',
-        name='multi_view_node',
-        parameters=[LaunchConfiguration('config')],
-        output='screen',
-        emulate_tty=True,
-        arguments=['--ros-args', '--log-level', 'info'],
-        respawn=True,
-        respawn_delay=3.0
-    )
-    
     
     return LaunchDescription([
         debug_arg,
         config_arg,
+        enable_nav_arg,
+        enable_multiview_arg,
         
-        # Launch main LangSAM tracker node
-        lang_sam_node,
-        
-        # Launch multi-view visualization
-        multi_view_node,
-        
+        # Launch lane following navigation (conditional)
+        lane_following_node,
         
         # Log launch information
         ExecuteProcess(
-            cmd=['echo', 'LangSAM Tracker launched successfully'],
+            cmd=['echo', 'Navigation system (Multi-view + Lane Following) launched successfully'],
             output='screen'
         )
     ])

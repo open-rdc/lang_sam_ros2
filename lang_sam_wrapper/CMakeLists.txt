@@ -69,7 +69,6 @@ install(TARGETS csrt_native fast_processing
 install(PROGRAMS
   lang_sam_wrapper/debug_lang_segment_anything.py
   lang_sam_wrapper/lang_sam_tracker_node.py
-  lang_sam_wrapper/multi_view_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

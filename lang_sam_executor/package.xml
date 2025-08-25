@@ -9,6 +9,12 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   
+  <!-- C++ dependencies -->
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>opencv_contrib_dev</depend>
+  
   <exec_depend>lang_sam_wrapper</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>

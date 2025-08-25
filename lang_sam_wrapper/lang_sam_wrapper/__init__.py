@@ -11,7 +11,7 @@ except ImportError:
     # Fallback if legacy tracker not available
     LangSAMTrackerNodeLegacy = None
 
-from .multi_view_node import MultiViewNode
+# Multi-view node moved to C++ implementation in lang_sam_executor package
 from .debug_lang_segment_anything import LangSAMNode
 
 # Allow importing the C++ CSRT module

@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
+from geometry_msgs.msg import Polygon, Point32
 import time
 
 from lang_sam.tracker_utils.lang_sam_tracker import LangSAMTracker
@@ -19,6 +20,16 @@ from lang_sam.tracker_utils.config_manager import ConfigManager
 from lang_sam.tracker_utils.logging_manager import setup_logging_for_ros_node
 from lang_sam.utils import draw_image
 from lang_sam_wrapper.fast_processing_client import get_fast_processing_client
+
+# Import custom message types
+try:
+    from lang_sam_msgs.msg import DetectionResult
+    from geometry_msgs.msg import Polygon, Point32
+    LANG_SAM_MSGS_AVAILABLE = True
+    print("Successfully imported lang_sam_msgs.msg.DetectionResult")
+except ImportError as e:
+    LANG_SAM_MSGS_AVAILABLE = False
+    print(f"Failed to import lang_sam_msgs: {e}")
 
 
 class Detection:
@@ -37,6 +48,8 @@ class LangSAMTrackerNode(Node):
     
     def __init__(self):
         super().__init__('lang_sam_tracker_node')
+        
+        print(f"[INIT] LANG_SAM_MSGS_AVAILABLE at __init__: {LANG_SAM_MSGS_AVAILABLE}")
         
         # 統一ロギングシステム初期化
         self.logger, self.perf_logger, self.error_ctx = setup_logging_for_ros_node(self, debug=False)
@@ -139,6 +152,37 @@ class LangSAMTrackerNode(Node):
         self.csrt_pub = self.create_publisher(Image, csrt_output_topic, 10)
         self.sam_pub = self.create_publisher(Image, sam_topic, 10)
         
+        # Detection results publisher for navigation (always create regardless of lang_sam_msgs)
+        print(f"\n=== PUBLISHER CREATION DEBUG ===")
+        print(f"[PUBLISHER] Creating DetectionResult publisher, LANG_SAM_MSGS_AVAILABLE: {LANG_SAM_MSGS_AVAILABLE}")
+        print(f"[PUBLISHER] DetectionResult class available: {DetectionResult if LANG_SAM_MSGS_AVAILABLE else 'NOT AVAILABLE'}")
+        self.logger.info(f"LANG_SAM_MSGS_AVAILABLE: {LANG_SAM_MSGS_AVAILABLE}")
+        
+        if LANG_SAM_MSGS_AVAILABLE:
+            try:
+                self.detection_pub = self.create_publisher(DetectionResult, '/lang_sam_detections', 10)
+                print("[PUBLISHER] ✓ DetectionResult publisher created successfully on /lang_sam_detections")
+                self.logger.info("✓ DetectionResult publisher created on /lang_sam_detections")
+                self.use_fallback_publisher = False
+            except Exception as e:
+                print(f"[PUBLISHER] ✗ Failed to create DetectionResult publisher: {e}")
+                self.logger.error(f"Failed to create DetectionResult publisher: {e}")
+                self.use_fallback_publisher = True
+                # Fall through to fallback creation
+        else:
+            self.use_fallback_publisher = True
+        
+        if self.use_fallback_publisher:
+            # Fallback: use standard ROS2 messages for compatibility
+            print("[PUBLISHER] Creating fallback String publisher...")
+            from sensor_msgs.msg import CompressedImage
+            from std_msgs.msg import Header, String
+            self.detection_pub = self.create_publisher(String, '/lang_sam_detections_simple', 10)
+            print("[PUBLISHER] ✓ Fallback String publisher created on /lang_sam_detections_simple")
+            self.logger.info("✓ Fallback String publisher created for lane following")
+        
+        print(f"=== PUBLISHER CREATION COMPLETE ===\n")
+        
         # Subscriber
         self.logger.info(f"画像サブスクリプション作成開始: {input_topic}")
         self.image_sub = self.create_subscription(
@@ -151,6 +195,12 @@ class LangSAMTrackerNode(Node):
         
         # Current tracking state
         self.current_detection_labels = []
+        
+        # Detection results cache for publishing
+        self.last_detection_boxes = []
+        self.last_detection_labels = []
+        self.last_detection_masks = []
+        self.last_detection_probs = []
         
         self.logger.info("LangSAMトラッカーノード初期化完了（同期処理版 + C++高速化）")
         
@@ -298,12 +348,15 @@ class LangSAMTrackerNode(Node):
         # C++ CSRTトラッカー初期化
         detection_boxes = []
         detection_labels = []
+        detection_boxes_for_msg = []  # For message publishing
         
         for det in detections:
             if hasattr(det, 'label') and det.label in self.tracking_targets:
                 bbox = (det.x, det.y, det.width, det.height)
                 detection_boxes.append(bbox)
                 detection_labels.append(det.label)
+                # Convert to [x1, y1, x2, y2] format for message
+                detection_boxes_for_msg.append([det.x, det.y, det.x + det.width, det.y + det.height])
         
         if detection_boxes:
             # C++ CSRT初期化
@@ -314,6 +367,8 @@ class LangSAMTrackerNode(Node):
             
             # 検出結果ラベル保存
             self.current_detection_labels = detection_labels.copy()
+            
+            # Note: Detection results will be published after SAM2 processing completes with masks
     
     def _process_csrt_tracking(self, image: np.ndarray, header):
         """CSRT継続トラッキング処理"""
@@ -560,6 +615,68 @@ class LangSAMTrackerNode(Node):
             self.logger.warning(f"ボックス可視化エラー: {e}")
             return image
     
+    def _run_sam2_segmentation_with_masks(self, image: np.ndarray, pil_image, boxes: list, labels: list):
+        """SAM2セグメンテーション実行してマスクも返す"""
+        try:
+            # ModelCoordinatorのSAMにアクセス
+            sam_predictor = self.lang_sam_tracker.coordinator.sam
+            
+            if sam_predictor is None:
+                self.logger.warning("SAM2 predictor not available")
+                return self._create_bbox_visualization(image, boxes, labels), []
+            
+            # RGB画像に変換（SAM2はRGB入力を期待）
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            
+            # SAM2推論実行（各ボックスに対してセグメンテーション）
+            xyxy = []
+            masks = []
+            valid_labels = []
+            
+            for i, box in enumerate(boxes):
+                try:
+                    # xyxy形式に変換
+                    x1, y1, x2, y2 = box
+                    xyxy_box = np.array([x1, y1, x2, y2])
+                    
+                    # SAM2推論
+                    sam_masks, scores, logits = sam_predictor.predict(image_rgb, xyxy_box)
+                    
+                    if sam_masks is not None and len(sam_masks) > 0:
+                        # 最高スコアのマスクを使用
+                        best_mask = sam_masks[0]  # multimask_output=Falseなので1つだけ
+                        
+                        # マスクを2D配列に変換
+                        if len(best_mask.shape) == 3:
+                            best_mask = best_mask[0]  # 次元を削減
+                        
+                        # draw_image用にデータを準備
+                        xyxy.append([x1, y1, x2, y2])
+                        masks.append(best_mask)
+                        valid_labels.append(labels[i] if i < len(labels) else "unknown")
+                        
+                except Exception as e:
+                    self.logger.debug(f"SAM2推論エラー (box {i}): {e}")
+                    continue
+            
+            if xyxy and masks:
+                # draw_imageでセグメンテーション結果を可視化
+                sam_img = draw_image(
+                    image_rgb=image,
+                    masks=masks,
+                    xyxy=np.array(xyxy),
+                    probs=[1.0] * len(xyxy),
+                    labels=valid_labels
+                )
+                return sam_img, masks
+            else:
+                # セグメンテーション失敗時はボックスのみ表示
+                return self._create_bbox_visualization(image, boxes, labels), []
+                
+        except Exception as e:
+            self.logger.warning(f"SAM2セグメンテーション実行エラー: {e}")
+            return self._create_bbox_visualization(image, boxes, labels), []
+    
     def _process_sam_segmentation_independent(self, image: np.ndarray, header):
         """SAM2独立実行処理（CSRTトラッキング結果を使用）"""
         try:
@@ -582,14 +699,38 @@ class LangSAMTrackerNode(Node):
             
             if boxes:
                 # SAM2セグメンテーション実行
-                sam_img = self._run_sam2_segmentation(image, pil_image, boxes, self.cached_csrt_labels)
+                sam_img, masks = self._run_sam2_segmentation_with_masks(image, pil_image, boxes, self.cached_csrt_labels)
                 
                 # ROS配信
                 sam_msg = self.cv_bridge.cv2_to_imgmsg(sam_img, 'bgr8')
                 sam_msg.header = header
                 self.sam_pub.publish(sam_msg)
                 
-                self.logger.debug(f"SAM2独立実行完了: {len(boxes)}オブジェクト")
+                # Update detection results with SAM2 masks
+                if masks:
+                    self.logger.info(f"SAM2生成マスク数: {len(masks)}")
+                    for i, mask in enumerate(masks):
+                        self.logger.debug(f"マスク{i}: shape={mask.shape}, dtype={mask.dtype}")
+                    
+                    self._cache_detection_results(
+                        boxes=boxes,
+                        labels=self.cached_csrt_labels,
+                        masks=masks,
+                        probs=[1.0] * len(boxes)
+                    )
+                    
+                    # Publish updated detection results with masks
+                    self._publish_detection_results(
+                        boxes=boxes,
+                        labels=self.cached_csrt_labels,
+                        masks=masks,
+                        probs=[1.0] * len(boxes),
+                        header=header
+                    )
+                else:
+                    self.logger.warn("SAM2でマスクが生成されませんでした")
+                
+                self.logger.debug(f"SAM2独立実行完了: {len(boxes)}オブジェクト, {len(masks) if masks else 0}マスク")
             else:
                 # ボックスなし、元画像配信
                 sam_msg = self.cv_bridge.cv2_to_imgmsg(image, 'bgr8')
@@ -613,6 +754,170 @@ class LangSAMTrackerNode(Node):
         # SAM画像（非独立モード時のみ）
         if not self.sam2_independent_mode:
             self.sam_pub.publish(image_msg)
+    
+    def _publish_detection_results(self, boxes: list, labels: list, masks: list, probs: list, header):
+        """検出結果をDetectionResultメッセージで配信"""
+        print(f"[PUBLISH] _publish_detection_results called with {len(boxes)} boxes, {len(labels)} labels")
+        print(f"[PUBLISH] LANG_SAM_MSGS_AVAILABLE: {LANG_SAM_MSGS_AVAILABLE}")
+        print(f"[PUBLISH] use_fallback_publisher: {self.use_fallback_publisher}")
+        print(f"[PUBLISH] detection_pub is None: {self.detection_pub is None}")
+        
+        if self.use_fallback_publisher:
+            print("[PUBLISH] Using fallback String publisher")
+            self.logger.warn("Using fallback String publisher")
+            self._publish_detection_results_fallback(boxes, labels, masks, probs, header)
+            return
+        if self.detection_pub is None:
+            print("[PUBLISH] Detection publisher is None, skipping")
+            self.logger.warn("Detection publisher is None, skipping detection publish")
+            return
+        
+        print("[PUBLISH] Using DetectionResult publisher")
+            
+        try:
+            # Create DetectionResult message
+            detection_msg = DetectionResult()
+            detection_msg.header = header
+            detection_msg.num_detections = len(boxes)
+            detection_msg.model_used = "GroundingDINO+SAM2+CSRT"
+            
+            # Convert boxes to Polygon format
+            for box in boxes:
+                polygon = Polygon()
+                if len(box) == 4:  # [x1, y1, x2, y2] format
+                    x1, y1, x2, y2 = box
+                    # Create rectangle polygon
+                    polygon.points = [
+                        Point32(x=float(x1), y=float(y1), z=0.0),
+                        Point32(x=float(x2), y=float(y1), z=0.0),
+                        Point32(x=float(x2), y=float(y2), z=0.0),
+                        Point32(x=float(x1), y=float(y2), z=0.0)
+                    ]
+                detection_msg.boxes.append(polygon)
+            
+            # Add labels and probabilities
+            detection_msg.labels = labels
+            detection_msg.probabilities = [float(p) for p in probs]
+            
+            # Convert masks to sensor_msgs/Image format
+            self.logger.debug(f"マスク変換開始: {len(masks)}個のマスクを処理")
+            for i, mask in enumerate(masks):
+                if mask is not None:
+                    try:
+                        self.logger.debug(f"マスク{i}: shape={mask.shape}, dtype={mask.dtype}, min={mask.min()}, max={mask.max()}")
+                        
+                        # Ensure mask is 2D boolean or uint8
+                        if mask.dtype == bool:
+                            mask = mask.astype(np.uint8) * 255
+                        elif mask.dtype != np.uint8:
+                            mask = (mask * 255).astype(np.uint8)
+                        
+                        # Convert to grayscale if needed
+                        if len(mask.shape) == 3:
+                            mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                        
+                        # Ensure mask is contiguous in memory
+                        mask = np.ascontiguousarray(mask)
+                        
+                        # Convert to ROS Image message
+                        mask_msg = self.cv_bridge.cv2_to_imgmsg(mask, encoding="mono8")
+                        mask_msg.header = header
+                        detection_msg.masks.append(mask_msg)
+                        self.logger.debug(f"マスク{i}変換成功: {mask_msg.width}x{mask_msg.height}")
+                    except Exception as e:
+                        self.logger.error(f"マスク{i}変換エラー: {e}")
+                        # Create empty mask as fallback
+                        empty_mask = np.zeros((100, 100), dtype=np.uint8)
+                        mask_msg = self.cv_bridge.cv2_to_imgmsg(empty_mask, encoding="mono8")
+                        mask_msg.header = header
+                        detection_msg.masks.append(mask_msg)
+                else:
+                    self.logger.debug(f"マスク{i}はNoneです - 空のマスクを作成")
+                    # Create empty mask for None values
+                    empty_mask = np.zeros((100, 100), dtype=np.uint8)
+                    mask_msg = self.cv_bridge.cv2_to_imgmsg(empty_mask, encoding="mono8")
+                    mask_msg.header = header
+                    detection_msg.masks.append(mask_msg)
+            
+            # Publish the detection result
+            print(f"[PUBLISH] About to publish DetectionResult message")
+            try:
+                self.detection_pub.publish(detection_msg)
+                print(f"[PUBLISH] ✓ DetectionResult message published successfully")
+                self.logger.info(f"検出結果配信完了: {len(boxes)}ボックス, {len(detection_msg.masks)}マスク, {len(labels)}ラベル")
+            except Exception as publish_e:
+                print(f"[PUBLISH] ✗ Failed to publish DetectionResult: {publish_e}")
+                self.logger.error(f"Failed to publish DetectionResult: {publish_e}")
+                raise
+            
+        except Exception as e:
+            self.logger.error(f"検出結果配信エラー: {e}")
+    
+    def _publish_detection_results_fallback(self, boxes: list, labels: list, masks: list, probs: list, header):
+        """Fallback: 検出結果をStringメッセージで配信"""
+        print(f"[FALLBACK] Starting fallback detection publishing with {len(boxes)} boxes, {len(labels)} labels")
+        self.logger.info(f"[FALLBACK] Publishing detection results via String message: {len(boxes)} detections")
+        
+        try:
+            import json
+            
+            # Create detection data structure
+            detection_data = {
+                "timestamp": header.stamp.sec + header.stamp.nanosec * 1e-9,
+                "frame_id": header.frame_id,
+                "num_detections": len(boxes),
+                "model_used": "GroundingDINO+SAM2+CSRT",
+                "boxes": [],
+                "labels": labels,
+                "probabilities": [float(p) for p in probs],
+                "has_masks": len(masks) > 0 and any(mask is not None for mask in masks)
+            }
+            
+            # Convert boxes to simple format [x1, y1, x2, y2]
+            for box in boxes:
+                if len(box) == 4:
+                    detection_data["boxes"].append([float(x) for x in box])
+            
+            # Add mask information (simplified - just indicate if white line masks exist)
+            white_line_masks = []
+            for i, label in enumerate(labels):
+                if label == "white line" and i < len(masks) and masks[i] is not None:
+                    mask = masks[i]
+                    # Convert mask to binary and find contours for simplified representation
+                    if mask.dtype == bool:
+                        mask_binary = mask.astype(np.uint8) * 255
+                    else:
+                        mask_binary = (mask > 0).astype(np.uint8) * 255
+                    
+                    # Store mask dimensions and non-zero pixel count as proxy
+                    white_line_masks.append({
+                        "index": i,
+                        "shape": mask.shape,
+                        "non_zero_pixels": int(np.count_nonzero(mask_binary))
+                    })
+            
+            detection_data["white_line_masks"] = white_line_masks
+            
+            # Publish as JSON string
+            json_str = json.dumps(detection_data)
+            string_msg = String()
+            string_msg.data = json_str
+            
+            print(f"[FALLBACK] Publishing JSON string with {len(json_str)} characters")
+            print(f"[FALLBACK] JSON preview: {json_str[:200]}...")
+            self.detection_pub.publish(string_msg)
+            print(f"[FALLBACK] ✓ Message published successfully")
+            self.logger.info(f"[FALLBACK] 検出結果配信完了: {len(boxes)}ボックス, {len(white_line_masks)}白線マスク, {len(labels)}ラベル")
+            
+        except Exception as e:
+            self.logger.error(f"[FALLBACK] 検出結果配信エラー: {e}")
+    
+    def _cache_detection_results(self, boxes: list, labels: list, masks: list = None, probs: list = None):
+        """検出結果をキャッシュ"""
+        self.last_detection_boxes = boxes.copy() if boxes else []
+        self.last_detection_labels = labels.copy() if labels else []
+        self.last_detection_masks = masks.copy() if masks else []
+        self.last_detection_probs = probs.copy() if probs else [1.0] * len(boxes)
     
     def __del__(self):
         """デストラクタ"""

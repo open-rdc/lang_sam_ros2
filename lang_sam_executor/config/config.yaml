@@ -8,11 +8,12 @@ lang_sam_tracker_node:
     tracking_targets: ["white line", "red pylon", "human", "car"]  # CSRT追跡対象
     
     # ===== 実行周波数設定 =====
-    gdino_interval_seconds: 2.0  # GroundingDINO実行間隔（2.0秒 = 0.5Hz）
+    gdino_interval_seconds: 1.0  # GroundingDINO実行間隔（2.0秒 = 0.5Hz）
     sam2_interval_seconds: 0.1   # SAM2セグメンテーション実行間隔（0.1秒 = 10Hz）
     sam2_independent_mode: true  # SAM2独立実行モード（CSRTトラッキング結果を使用）
     
     # ===== ROS2トピック設定 =====
+    # input_topic: "/image_raw"  # 入力画像（simulator）
     input_topic: "/zed/zed_node/rgb/image_rect_color"  # 入力画像（ZEDカメラ）
     gdino_topic: "/image_gdino"    # GroundingDINO検出結果配信
     csrt_output_topic: "/image_csrt"      # CSRT追跡結果配信
@@ -34,33 +35,68 @@ lang_sam_tracker_node:
     csrt_use_segmentation: true           # セグメンテーション（デフォルト：true、false時は軽量化）
     csrt_window_function: "hann"          # 窓関数（デフォルト：hann、cosine/uniform選択可）
     csrt_kaiser_alpha: 3.75               # Kaiser窓α（デフォルト：3.75、大=シャープ、小=スムーズ）
-    csrt_cheb_attenuation: 45.0           # Chebyshev減衰（デフォルト：45.0、大=ノイズ抑制強化）
-    csrt_template_size: 200.0             # テンプレートサイズ（デフォルト：200、大=精度向上・計算量増）
-    csrt_gsl_sigma: 1.0                   # ガウシアンσ（デフォルト：1.0、大=広範囲探索）
-    csrt_hog_orientations: 9              # HOG方向数（デフォルト：9、大=精度向上・計算量増）
-    csrt_hog_clip: 0.2                    # HOGクリップ（デフォルト：0.2、小=特徴量保持強化）
-    csrt_padding: 4.0                     # パディング倍率（デフォルト：3.0、大=探索範囲拡大）
-    csrt_filter_lr: 0.04                  # フィルター学習率（デフォルト：0.02、大=高速適応・不安定化）
-    csrt_weights_lr: 0.04                 # 重み学習率（デフォルト：0.02、大=高速適応・不安定化）
+    csrt_cheb_attenuation: 55.0           # Chebyshev減衰（デフォルト：45.0、大=ノイズ抑制強化）
+    csrt_template_size: 250.0             # テンプレートサイズ（デフォルト：200、大=精度向上・計算量増）
+    csrt_gsl_sigma: 1.4                   # ガウシアンσ（デフォルト：1.0、大=広範囲探索）
+    csrt_hog_orientations: 11              # HOG方向数（デフォルト：9、大=精度向上・計算量増）
+    csrt_hog_clip: 0.3                    # HOGクリップ（デフォルト：0.2、小=特徴量保持強化）
+    csrt_padding: 5.0                     # パディング倍率（デフォルト：3.0、大=探索範囲拡大）
+    csrt_filter_lr: 0.03                  # フィルター学習率（デフォルト：0.02、大=高速適応・不安定化）
+    csrt_weights_lr: 0.03                 # 重み学習率（デフォルト：0.02、大=高速適応・不安定化）
     csrt_num_hog_channels_used: -1        # HOGチャンネル数（デフォルト：-1全て、正数=制限・軽量化）
     csrt_admm_iterations: 4               # ADMM反復数（デフォルト：4、大=精度向上・計算量増）
     csrt_histogram_bins: 16               # ヒストグラム量子化（デフォルト：16、大=精度向上・計算量増）
     csrt_histogram_lr: 0.05               # ヒストグラム学習率（デフォルト：0.04、大=高速適応）
     csrt_background_ratio: 2              # 背景領域比率（デフォルト：2、大=背景情報増加）
-    csrt_number_of_scales: 51             # スケール探索数（デフォルト：33、大=スケール頑健性向上）
-    csrt_scale_sigma_factor: 0.75         # スケールσ係数（デフォルト：0.25、大=スケール範囲拡大）
+    csrt_number_of_scales: 100             # スケール探索数（デフォルト：33、大=スケール頑健性向上）
+    csrt_scale_sigma_factor: 0.50         # スケールσ係数（デフォルト：0.25、大=スケール範囲拡大）
     csrt_scale_model_max_area: 2048.0      # スケール最大面積（デフォルト：512、大=大物体対応）
     csrt_scale_lr: 0.045                  # スケール学習率（デフォルト：0.025、大=スケール高速適応）
-    csrt_scale_step: 1.22                 # スケールステップ（デフォルト：1.02、大=粗いスケール探索）
-    csrt_psr_threshold: 0.035             # PSR閾値（デフォルト：0.035、小=追跡継続しやすく）
+    csrt_scale_step: 1.12                 # スケールステップ（デフォルト：1.02、大=粗いスケール探索）
+    csrt_psr_threshold: 0.025             # PSR閾値（デフォルト：0.035、小=追跡継続しやすく）
+
+lane_following_node:
+  ros__parameters:
+    # ===== 制御パラメータ =====
+    linear_velocity: 1.0           # 前進速度（m/s）
+    kp: 1.0                        # PID制御のP（比例）ゲイン
+    ki: 0.1                        # PID制御のI（積分）ゲイン
+    kd: 0.05                       # PID制御のD（微分）ゲイン
+    original_image_topic: "/zed/zed_node/rgb/image_rect_color"  # 元画像トピック
+    
+    # ===== ハフ変換パラメータ =====
+    hough_threshold: 50            # ハフ変換の閾値（投票数）
+    hough_rho: 1.0                 # 距離解像度（pixel）
+    hough_theta: 0.017453          # 角度解像度（radian, CV_PI/180）
+    hough_min_line_length: 30      # 最小線長（pixel）
+    hough_max_line_gap: 10         # 最大線間隙（pixel）
+    
+    # ===== 車線検出パラメータ =====
+    lane_split_ratio: 0.5          # 左右分割比率（0.0-1.0、0.4=少し左寄り分割）
+    roi_top_offset: 50             # ROI上部オフセット（pixel、上から除外）
+    roi_bottom_offset: 0           # ROI下部オフセット（pixel、下から除外）
+    
+    
+    # ===== 可視化パラメータ =====
+    enable_visualization: true     # 可視化有効化フラグ
+    line_thickness: 3              # 線の太さ（pixel）
+    circle_radius: 10              # 円の半径（pixel）
+    
+    # ===== ピクセルベース検出パラメータ =====
+    pixel_search_tolerance: 100         # ピクセル探索範囲（50-200推奨、大=広範囲探索）
+    use_skeleton: false                 # スケルトン化の有効・無効（false=多ピクセル保持）
+    min_pixels_for_line_fit: 5         # 線フィッティングの最小ピクセル数（3-10推奨）
+    morph_kernel_size: 3               # モルフォロジー処理のカーネルサイズ（3-7推奨）
+    gaussian_blur_size: 5              # ガウシアンブラーのサイズ（3-9の奇数）
+    enable_adaptive_tolerance: true    # 適応的探索範囲の有効・無効
 
 multi_view_node:
   ros__parameters:
-    # ===== 入力トピック設定 =====
-    original_topic: "/zed/zed_node/rgb/image_rect_color"  # ZED生画像
-    gdino_topic: "/image_gdino"    # GroundingDINO検出結果画像
-    csrt_output_topic: "/image_csrt"      # CSRT追跡結果画像
-    sam_topic: "/image_sam"        # SAM2セグメンテーション結果画像
+    # ===== 4分割画像配置設定 =====
+    upper_left_topic: "/image_gdino"  # 左上の画像トピック
+    upper_right_topic: "/image_csrt"    # 右上の画像トピック
+    lower_left_topic: "/image_sam"      # 左下の画像トピック
+    lower_right_topic: "/lane_following_visualization"      # 右下の画像トピック
     
     # ===== 4分割画像出力設定 =====
     output_fps: 30.0               # 統合画像配信周波数（Hz）
