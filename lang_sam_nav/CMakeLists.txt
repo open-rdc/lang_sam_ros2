@@ -26,6 +26,7 @@ include_directories(include)
 # Create lane_following_node executable
 add_executable(lane_following_node 
   src/lane_following_node.cpp
+  src/lane_pixel_finder.cpp
 )
 
 # Dependencies for lane_following_node

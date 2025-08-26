@@ -13,11 +13,11 @@ from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
-    # Package directories
+    # パッケージディレクトリ
     lang_sam_executor_dir = get_package_share_directory('lang_sam_executor')
     config_file = os.path.join(lang_sam_executor_dir, 'config', 'config.yaml')
     
-    # Launch arguments
+    # 起動引数
     debug_arg = DeclareLaunchArgument(
         'debug',
         default_value='false',
@@ -31,7 +31,7 @@ def generate_launch_description():
     )
     
     
-    # Main LangSAM tracker node (with C++ CSRT)
+    # メインLangSAMトラッカーノード（C++ CSRT統合）
     lang_sam_node = Node(
         package='lang_sam_wrapper',
         executable='lang_sam_tracker_node.py',
@@ -44,7 +44,7 @@ def generate_launch_description():
         respawn_delay=5.0
     )
     
-    # Multi-view visualization node (C++ implementation)
+    # マルチビュー可視化ノード（C++実装）
     multi_view_node = Node(
         package='lang_sam_executor',
         executable='multi_view_node',
@@ -62,14 +62,14 @@ def generate_launch_description():
         debug_arg,
         config_arg,
         
-        # Launch main LangSAM tracker node
+        # メインLangSAMトラッカーノードを起動
         lang_sam_node,
         
-        # Launch multi-view visualization
+        # マルチビュー可視化を起動
         multi_view_node,
         
         
-        # Log launch information
+        # 起動情報をログ出力
         ExecuteProcess(
             cmd=['echo', 'LangSAM Tracker launched successfully'],
             output='screen'

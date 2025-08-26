@@ -1,5 +1,5 @@
 /*
- * Multi-View Node C++ Implementation
+ * マルチビューノード C++実装
  * 4分割画像表示ノード（高性能C++版）
  */
 

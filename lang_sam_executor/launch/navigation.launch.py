@@ -13,11 +13,11 @@ from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
-    # Package directories
+    # パッケージディレクトリ
     lang_sam_executor_dir = get_package_share_directory('lang_sam_executor')
     config_file = os.path.join(lang_sam_executor_dir, 'config', 'config.yaml')
     
-    # Launch arguments
+    # 起動引数
     debug_arg = DeclareLaunchArgument(
         'debug',
         default_value='false',
@@ -42,7 +42,7 @@ def generate_launch_description():
         description='Enable multi-view visualization node'
     )
     
-    # Lane following navigation node (conditional)
+    # 車線追従ナビゲーションノード（条件付き）
     lane_following_node = Node(
         package='lang_sam_nav',
         executable='lane_following_node',
@@ -62,10 +62,10 @@ def generate_launch_description():
         enable_nav_arg,
         enable_multiview_arg,
         
-        # Launch lane following navigation (conditional)
+        # 車線追従ナビゲーションを起動（条件付き）
         lane_following_node,
         
-        # Log launch information
+        # 起動情報をログ出力
         ExecuteProcess(
             cmd=['echo', 'Navigation system (Multi-view + Lane Following) launched successfully'],
             output='screen'

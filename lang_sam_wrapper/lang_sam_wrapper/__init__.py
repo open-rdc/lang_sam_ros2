@@ -1,22 +1,22 @@
-# lang_sam_ros2 package initialization
+# lang_sam_ros2 パッケージ初期化
 try:
     from .lang_sam_tracker_node import LangSAMTrackerNode
 except ImportError:
-    # Fallback if tracker not available
+    # トラッカーが利用できない場合のフォールバック
     LangSAMTrackerNode = None
 
 try:
     from .lang_sam_tracker_node_legacy import LangSAMTrackerNodeLegacy
 except ImportError:
-    # Fallback if legacy tracker not available
+    # レガシートラッカーが利用できない場合のフォールバック
     LangSAMTrackerNodeLegacy = None
 
-# Multi-view node moved to C++ implementation in lang_sam_executor package
+# マルチビューノードはlang_sam_executorパッケージのC++実装に移動
 from .debug_lang_segment_anything import LangSAMNode
 
-# Allow importing the C++ CSRT module
+# C++ CSRTモジュールのインポートを許可
 try:
     from .csrt_native import *
 except ImportError:
-    # Fallback if C++ extension not available
+    # C++拡張が利用できない場合のフォールバック
     pass

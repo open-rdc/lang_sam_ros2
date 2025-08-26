@@ -21,7 +21,7 @@ from lang_sam.tracker_utils.logging_manager import setup_logging_for_ros_node
 from lang_sam.utils import draw_image
 from lang_sam_wrapper.fast_processing_client import get_fast_processing_client
 
-# Import custom message types
+# カスタムメッセージ型をインポート
 try:
     from lang_sam_msgs.msg import DetectionResult
     from geometry_msgs.msg import Polygon, Point32
@@ -67,14 +67,14 @@ class LangSAMTrackerNode(Node):
             self._load_parameters()
             self.system_config = None
         
-        # Initialize CV Bridge
+        # CV Bridge を初期化
         self.cv_bridge = CvBridge()
         
-        # Initialize Fast Processing Client
+        # 高速処理クライアントを初期化
         self.fast_client = get_fast_processing_client()
         self.logger.info("高速化処理クライアント初期化完了")
         
-        # Initialize LangSAM tracker
+        # LangSAMトラッカーを初期化
         if self.system_config:
             sam_model = self.system_config.model.sam_model
             text_prompt = self.system_config.model.text_prompt
@@ -102,7 +102,7 @@ class LangSAMTrackerNode(Node):
             bbox_margin = self.bbox_margin
             bbox_min_size = self.bbox_min_size
             
-        # Initialize native C++ CSRT client
+        # ネイティブC++ CSRTクライアントを初期化
         self.logger.info("C++ CSRTクライアント初期化開始")
         self.csrt_client = CSRTClient(self)
         
@@ -112,7 +112,7 @@ class LangSAMTrackerNode(Node):
             
         self.logger.info("ネイティブC++ CSRTクライアント初期化完了")
         
-        # Initialize LangSAM tracker
+        # LangSAMトラッカーを初期化
         self.logger.info("LangSAMトラッカー初期化開始")
         self.lang_sam_tracker = LangSAMTracker(
             sam_type=sam_model,
@@ -120,7 +120,7 @@ class LangSAMTrackerNode(Node):
         )
         self.logger.info("LangSAMトラッカー初期化完了")
         
-        # Store configuration
+        # 設定を保存
         self.text_prompt = text_prompt
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
@@ -137,7 +137,7 @@ class LangSAMTrackerNode(Node):
             self.sam2_interval_seconds = 0.1  # デフォルト10Hz
             self.sam2_independent_mode = True
         
-        # Timing control
+        # タイミング制御
         self.last_gdino_time = 0.0
         self.last_sam2_time = 0.0  # SAM2独立タイマー
         self.frame_count = 0
@@ -147,7 +147,7 @@ class LangSAMTrackerNode(Node):
         self.cached_csrt_labels = []
         self.cached_image = None
         
-        # Publishers
+        # パブリッシャー
         self.gdino_pub = self.create_publisher(Image, gdino_topic, 10)
         self.csrt_pub = self.create_publisher(Image, csrt_output_topic, 10)
         self.sam_pub = self.create_publisher(Image, sam_topic, 10)
@@ -183,7 +183,7 @@ class LangSAMTrackerNode(Node):
         
         print(f"=== PUBLISHER CREATION COMPLETE ===\n")
         
-        # Subscriber
+        # サブスクライバー
         self.logger.info(f"画像サブスクリプション作成開始: {input_topic}")
         self.image_sub = self.create_subscription(
             Image,
@@ -193,10 +193,10 @@ class LangSAMTrackerNode(Node):
         )
         self.logger.info(f"画像サブスクリプション作成完了: {input_topic}")
         
-        # Current tracking state
+        # 現在のトラッキング状態
         self.current_detection_labels = []
         
-        # Detection results cache for publishing
+        # 配信用の検出結果キャッシュ
         self.last_detection_boxes = []
         self.last_detection_labels = []
         self.last_detection_masks = []
@@ -216,13 +216,13 @@ class LangSAMTrackerNode(Node):
         self.declare_parameter('text_threshold', 0.25)
         self.declare_parameter('gdino_interval_seconds', 1.0)
         
-        # Topic parameters
+        # トピックパラメータ
         self.declare_parameter('input_topic', '/zed/zed_node/rgb/image_rect_color')
         self.declare_parameter('gdino_topic', '/image_gdino')
         self.declare_parameter('csrt_output_topic', '/image_csrt')
         self.declare_parameter('sam_topic', '/image_sam')
         
-        # Tracking parameters
+        # トラッキングパラメータ
         self.declare_parameter('bbox_margin', 5)
         self.declare_parameter('bbox_min_size', 3)
         self.declare_parameter('tracking_targets', ['white line', 'red pylon', 'human', 'car'])
@@ -249,7 +249,7 @@ class LangSAMTrackerNode(Node):
         self.logger.info(f"画像コールバック開始: フレーム{self.frame_count + 1}")
         
         try:
-            # Convert ROS image to OpenCV
+            # ROS画像をOpenCVへ変換
             image = self.cv_bridge.imgmsg_to_cv2(msg, 'bgr8')
             current_time = time.time()
             self.frame_count += 1

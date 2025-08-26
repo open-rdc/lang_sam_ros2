@@ -57,38 +57,19 @@ lang_sam_tracker_node:
 
 lane_following_node:
   ros__parameters:
-    # ===== 制御パラメータ =====
+    # ===== 制御パラメータ（YOLOP Nav互換）=====
     linear_velocity: 1.0           # 前進速度（m/s）
-    kp: 1.0                        # PID制御のP（比例）ゲイン
-    ki: 0.1                        # PID制御のI（積分）ゲイン
-    kd: 0.05                       # PID制御のD（微分）ゲイン
+    kp: 1.0                        # P制御ゲイン（比例制御のみ使用）
+    max_angular_velocity: 1.0      # 最大角速度（rad/s）
     original_image_topic: "/zed/zed_node/rgb/image_rect_color"  # 元画像トピック
     
-    # ===== ハフ変換パラメータ =====
-    hough_threshold: 50            # ハフ変換の閾値（投票数）
-    hough_rho: 1.0                 # 距離解像度（pixel）
-    hough_theta: 0.017453          # 角度解像度（radian, CV_PI/180）
-    hough_min_line_length: 30      # 最小線長（pixel）
-    hough_max_line_gap: 10         # 最大線間隙（pixel）
-    
-    # ===== 車線検出パラメータ =====
-    lane_split_ratio: 0.5          # 左右分割比率（0.0-1.0、0.4=少し左寄り分割）
-    roi_top_offset: 50             # ROI上部オフセット（pixel、上から除外）
-    roi_bottom_offset: 0           # ROI下部オフセット（pixel、下から除外）
-    
+    # ===== ピクセル検出パラメータ =====
+    pixel_tolerance: 100           # ピクセル探索範囲（大きめに設定）
     
     # ===== 可視化パラメータ =====
     enable_visualization: true     # 可視化有効化フラグ
     line_thickness: 3              # 線の太さ（pixel）
     circle_radius: 10              # 円の半径（pixel）
-    
-    # ===== ピクセルベース検出パラメータ =====
-    pixel_search_tolerance: 100         # ピクセル探索範囲（50-200推奨、大=広範囲探索）
-    use_skeleton: false                 # スケルトン化の有効・無効（false=多ピクセル保持）
-    min_pixels_for_line_fit: 5         # 線フィッティングの最小ピクセル数（3-10推奨）
-    morph_kernel_size: 3               # モルフォロジー処理のカーネルサイズ（3-7推奨）
-    gaussian_blur_size: 5              # ガウシアンブラーのサイズ（3-9の奇数）
-    enable_adaptive_tolerance: true    # 適応的探索範囲の有効・無効
 
 multi_view_node:
   ros__parameters:
