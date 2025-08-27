@@ -13,10 +13,10 @@ from typing import Dict, List, Optional, Tuple, Any
 from ..models.gdino import GDINO
 from ..models.sam import SAM
 from ..models.utils import DEVICE
-from .tracking_manager import TrackingManager
+# TrackingManager削除 - C++ CSRTClient使用のため
 from .tracking_config import TrackingConfig
-from .exceptions import SAM2InitError, GroundingDINOError
-from .logging_manager import LoggerFactory, create_log_context
+# カスタム例外削除 - 標準Exception使用
+import logging  # 標準Pythonロギングを使用 - logging_manager.py削除
 
 # デバッグモード制御は統一ロギングシステムで管理
 
@@ -37,14 +37,18 @@ class ModelCoordinator:
         self.device = device
         
         # 統一ロギング初期化
-        LoggerFactory.set_debug_mode(debug_mode)
-        self.logger = LoggerFactory.get_logger("model_coordinator")
-        self.perf_logger = LoggerFactory.get_performance_logger("model_coordinator")
+        # 標準Pythonロガー使用 - シンプルで軽量なログ出力
+        self.logger = logging.getLogger("model_coordinator")
+        if debug_mode:
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.INFO)
         
         self.sam = self._initialize_sam(sam_type, ckpt_path, device)
         self.gdino = self._initialize_gdino(device)
         
-        self.tracking_manager: Optional[TrackingManager] = None
+        # TrackingManager削除 - C++ CSRTClient使用のため
+        self.tracking_manager = None  # 後方互換性のためNoneを保持
         self.tracking_config = TrackingConfig()
     
     def _initialize_sam(self, sam_type: str, ckpt_path: Optional[str], device) -> SAM:
@@ -56,19 +60,14 @@ class ModelCoordinator:
         - バッチ推論用のメモリ効率最適化
         """
         try:
-            with self.perf_logger.measure_time("sam2_initialization", "ai_model"):
-                sam = SAM()
-                sam.build_model(sam_type, ckpt_path, device=device)
-                
-                context = create_log_context("ai_model", "sam2_init", 
-                                           model_type=sam_type, checkpoint=ckpt_path)
-                self.logger.info("SAM2モデル初期化完了", context)
-                return sam
+            self.logger.info(f"SAM2モデル初期化開始: {sam_type}, device={device}")
+            sam = SAM()
+            sam.build_model(sam_type, ckpt_path, device=device)
+            self.logger.info(f"SAM2モデル初期化完了: {sam_type}")
+            return sam
         except Exception as e:
-            context = create_log_context("ai_model", "sam2_init", 
-                                       model_type=sam_type, error=str(e))
-            self.logger.error("SAM2モデル初期化失敗", context)
-            raise SAM2InitError(sam_type, ckpt_path, e)
+            self.logger.error(f"SAM2モデル初期化失敗 ({sam_type}): {e}")
+            raise RuntimeError(f"SAM2モデル初期化失敗 - type: {sam_type}, error: {str(e)}")
     
     def _initialize_gdino(self, device) -> GDINO:
         """GroundingDINOモデル初期化：テキストプロンプトベースの物体検出
@@ -79,17 +78,14 @@ class ModelCoordinator:
         - 自然言語クエリによるゼロショット物体検出実現
         """
         try:
-            with self.perf_logger.measure_time("gdino_initialization", "ai_model"):
-                gdino = GDINO()
-                gdino.build_model(device=device)
-                
-                context = create_log_context("ai_model", "gdino_init", device=str(device))
-                self.logger.info("GroundingDINOモデル初期化完了", context)
-                return gdino
+            self.logger.info(f"GroundingDINOモデル初期化開始: device={device}")
+            gdino = GDINO()
+            gdino.build_model(device=device)
+            self.logger.info("GroundingDINOモデル初期化完了")
+            return gdino
         except Exception as e:
-            context = create_log_context("ai_model", "gdino_init", error=str(e))
-            self.logger.error("GroundingDINOモデル初期化失敗", context)
-            raise GroundingDINOError("initialization", e)
+            self.logger.error(f"GroundingDINOモデル初期化失敗: {e}")
+            raise RuntimeError(f"GroundingDINO初期化失敗: {str(e)}")
     
     def setup_tracking(self, tracking_targets: List[str], 
                       tracking_config: Optional[Dict[str, int]] = None,
@@ -104,15 +100,11 @@ class ModelCoordinator:
         if tracking_config:
             self.tracking_config.update(**tracking_config)
         
-        context = create_log_context("tracking", "setup", 
-                                   targets=tracking_targets, 
-                                   config_provided=tracking_config is not None,
-                                   csrt_params_provided=csrt_params is not None)
-        self.logger.info("トラッキングシステム初期化開始", context)
+        self.logger.info(f"トラッキングシステム初期化開始: targets={tracking_targets}")
         
-        self.tracking_manager = TrackingManager(tracking_targets, self.tracking_config, csrt_params)
-        
-        self.logger.info("トラッキングシステム初期化完了", context)
+        # TrackingManager削除 - 実際のトラッキングはC++ CSRTClientで実行
+        # このメソッドは後方互換性のためのスタブ
+        self.logger.info("トラッキングシステム初期化スキップ（C++実装使用）")
     
     def predict_full_pipeline(
         self,
@@ -135,22 +127,17 @@ class ModelCoordinator:
         - テンソルメモリ管理とCUDA kernel最適化
         """
         
-        with self.perf_logger.measure_time("full_pipeline", "ai_pipeline"):
-            context = create_log_context("ai_pipeline", "predict_full", 
-                                       num_images=len(images_pil),
-                                       prompts=texts_prompt,
-                                       update_trackers=update_trackers,
-                                       run_sam=run_sam)
-            self.logger.debug("AI推論パイプライン開始", context)
-            
-            gdino_results = self._run_grounding_dino(
-                images_pil, texts_prompt, box_threshold, text_threshold
-            )
-            
-            all_results = []
-            sam_images = []
-            sam_boxes = []
-            sam_indices = []
+        # AI推論パイプライン実行 - GroundingDINO/CSRT/SAM2統合処理
+        self.logger.debug(f"AI推論パイプライン開始 - images: {len(images_pil)}, prompts: {texts_prompt}, update_trackers: {update_trackers}, run_sam: {run_sam}")
+        
+        gdino_results = self._run_grounding_dino(
+            images_pil, texts_prompt, box_threshold, text_threshold
+        )
+        
+        all_results = []
+        sam_images = []
+        sam_boxes = []
+        sam_indices = []
         
         for idx, result in enumerate(gdino_results):
             result = self._convert_cuda_tensors(result)
@@ -170,10 +157,7 @@ class ModelCoordinator:
             if run_sam and sam_images:
                 self._run_sam_batch_inference(all_results, sam_images, sam_boxes, sam_indices)
             
-            result_context = create_log_context("ai_pipeline", "predict_complete", 
-                                              processed_images=len(all_results),
-                                              sam_processed=len(sam_images))
-            self.logger.debug("AI推論パイプライン完了", result_context)
+            self.logger.debug(f"AI推論パイプライン完了 - processed_images: {len(all_results)}, sam_processed: {len(sam_images)}")
             
             return all_results
     
@@ -191,7 +175,7 @@ class ModelCoordinator:
         try:
             return self.gdino.predict(images_pil, texts_prompt, box_threshold, text_threshold)
         except Exception as e:
-            raise GroundingDINOError("prediction", e)
+            raise RuntimeError(f"GroundingDINO推論失敗: {str(e)}")
     
     def _convert_cuda_tensors(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """GPUテンソル→CPU配列変換：CUDA-CPU間データ伝送最適化
@@ -215,48 +199,9 @@ class ModelCoordinator:
         - 相関フィルタベースのテンプレートマッチング初期化
         - 物体ラベルとトラッカーIDの関連付け管理（ラベル整合性保証）
         """
-        try:
-            boxes = gdino_result.get("boxes", [])
-            labels = gdino_result.get("labels", [])
-            
-            if len(boxes) == 0 or not self.tracking_manager:
-                return gdino_result
-            
-            # ラベルとボックスの数が一致することを確認
-            if len(boxes) != len(labels):
-                mismatch_context = create_log_context("tracking", "data_validation", 
-                                                    boxes_count=len(boxes), labels_count=len(labels))
-                self.logger.warning("ボックスとラベル数の不一致", mismatch_context)
-                return gdino_result
-            
-            # GroundingDINOの検出結果を記録
-            detection_context = create_log_context("tracking", "gdino_detection", 
-                                                  labels=labels, bbox_count=len(boxes))
-            self.logger.debug("GroundingDINO検出結果", detection_context)
-            
-            self.tracking_manager.initialize_trackers(boxes, labels, image_np)
-            
-            tracking_result = self.tracking_manager.get_tracking_result()
-            
-            # トラッキング結果を記録
-            if tracking_result["labels"]:
-                track_context = create_log_context("tracking", "tracking_result", 
-                                                 labels=tracking_result['labels'])
-                self.logger.debug("トラッキング結果取得", track_context)
-            
-            if tracking_result["boxes"].size > 0:
-                return {
-                    "boxes": tracking_result["boxes"],
-                    "labels": tracking_result["labels"],
-                    "scores": tracking_result["scores"]
-                }
-            else:
-                return gdino_result
-                
-        except Exception as e:
-            error_context = create_log_context("tracking", "integration_error", error=str(e))
-            self.logger.error("トラッキング統合エラー", error_context)
-            return gdino_result
+        # TrackingManager削除 - 実際のトラッキングはC++ CSRTClientで実行
+        # このメソッドは後方互換性のためのスタブ
+        return gdino_result
     
     def _prepare_sam_input(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """SAM2セグメンテーション入力データのフォーマット準備
@@ -288,10 +233,7 @@ class ModelCoordinator:
             # SAM入力情報を記録
             for i, (idx, boxes) in enumerate(zip(sam_indices, sam_boxes)):
                 labels = all_results[idx].get("labels", [])
-                sam_input_context = create_log_context("ai_model", "sam_input", 
-                                                     batch_idx=i, result_idx=idx, 
-                                                     boxes_count=len(boxes), labels=labels)
-                self.logger.debug("SAM入力データ準備", sam_input_context)
+                self.logger.debug(f"SAM入力データ準備 - batch_idx: {i}, result_idx: {idx}, boxes_count: {len(boxes)}, labels: {labels}")
             
             masks, mask_scores, _ = self.sam.predict_batch(sam_images, xyxy=sam_boxes)
             
@@ -300,10 +242,7 @@ class ModelCoordinator:
                 labels = all_results[idx].get("labels", [])
                 mask_count = len(mask) if hasattr(mask, '__len__') else 'N/A'
                 
-                sam_output_context = create_log_context("ai_model", "sam_output", 
-                                                      batch_idx=i, result_idx=idx, 
-                                                      mask_count=mask_count, labels=labels)
-                self.logger.debug("SAM出力処理", sam_output_context)
+                self.logger.debug(f"SAM出力処理 - batch_idx: {i}, result_idx: {idx}, mask_count: {mask_count}, labels: {labels}")
                 
                 all_results[idx].update({
                     "masks": mask,
@@ -311,8 +250,7 @@ class ModelCoordinator:
                 })
                 
         except Exception as e:
-            error_context = create_log_context("ai_model", "sam_batch_error", error=str(e))
-            self.logger.error("SAMバッチ推論エラー", error_context)
+            self.logger.error(f"SAMバッチ推論エラー - error: {str(e)}")
     
     def update_tracking_only(self, image_np: np.ndarray) -> Dict[str, Any]:
         """高速CSRTトラッキングのみ実行：30Hzリアルタイム処理版
@@ -323,26 +261,8 @@ class ModelCoordinator:
         - フレーム間の小さな変化に対する適応的追跡
         - ラベル整合性の継続保証
         """
-        if not self.tracking_manager:
-            return self._empty_result()
-        
-        try:
-            tracked_boxes = self.tracking_manager.update_all_trackers(image_np)
-            if tracked_boxes:
-                result = self.tracking_manager.get_tracking_result()
-                # トラッキング専用モードの結果確認
-                if result["labels"]:
-                    track_only_context = create_log_context("tracking", "tracking_only", 
-                                                          labels=result['labels'])
-                    self.logger.debug("Tracking-only結果", track_only_context)
-                return result
-            else:
-                return self._empty_result()
-                
-        except Exception as e:
-            error_context = create_log_context("tracking", "tracking_only_error", error=str(e))
-            self.logger.error("Tracking-onlyエラー", error_context)
-            return self._empty_result()
+        # TrackingManager削除 - 実際のトラッキングはC++ CSRTClientで実行
+        return self._empty_result()
     
     def update_tracking_with_sam(self, image_np: np.ndarray) -> Dict[str, Any]:
         """統合トラッキング+セグメンテーション：高精度マスク生成
@@ -352,57 +272,8 @@ class ModelCoordinator:
         2. 追跡結果BBoxをSAM2のプロンプトとして入力
         3. Vision Transformerによる高精度セグメンテーション（GPU推論）
         """
-        if not self.tracking_manager:
-            return self._empty_result()
-        
-        try:
-            tracked_boxes = self.tracking_manager.update_all_trackers(image_np)
-            
-            if not tracked_boxes:
-                return self._empty_result()
-            
-            tracking_result = self.tracking_manager.get_tracking_result()
-            boxes = tracking_result["boxes"]
-            labels = tracking_result["labels"]
-            
-            # Tracking+SAM入力ラベル確認
-            track_sam_context = create_log_context("tracking", "track_sam_input", 
-                                                 boxes_count=len(boxes), labels=labels)
-            self.logger.debug("Tracking+SAM入力", track_sam_context)
-            
-            try:
-                masks, mask_scores, _ = self.sam.predict_batch(
-                    [image_np], xyxy=[boxes]
-                )
-                
-                result_masks, result_scores = self._process_sam_results(
-                    masks, mask_scores, len(boxes)
-                )
-                
-                # Tracking+SAM出力確認
-                track_sam_output_context = create_log_context("tracking", "track_sam_output", 
-                                                            mask_count=len(result_masks), labels=labels)
-                self.logger.debug("Tracking+SAM出力", track_sam_output_context)
-                
-                return {
-                    "boxes": boxes,
-                    "labels": labels,
-                    "scores": tracking_result["scores"],
-                    "masks": result_masks,
-                    "mask_scores": result_scores
-                }
-                
-            except Exception as e:
-                sam_error_context = create_log_context("tracking", "track_sam_error", error=str(e))
-                self.logger.error("Tracking+SAM SAM処理エラー", sam_error_context)
-                return {
-                    **tracking_result,
-                    "masks": [],
-                    "mask_scores": np.ones(len(boxes))
-                }
-                
-        except Exception:
-            return self._empty_result()
+        # TrackingManager削除 - 実際のトラッキングはC++ CSRTClientで実行
+        return self._empty_result()
     
     def _process_sam_results(self, masks: Any, mask_scores: Any, 
                            num_boxes: int) -> Tuple[List, np.ndarray]:
@@ -449,11 +320,11 @@ class ModelCoordinator:
         }
     
     def clear_tracking_state(self) -> None:
-        """追跡状態クリア"""
-        if self.tracking_manager:
-            self.tracking_manager.clear_trackers()
+        """追跡状態クリア（スタブ）"""
+        # TrackingManager削除 - 実際のクリアはC++ CSRTClientで実行
+        pass
     
     def has_active_tracking(self) -> bool:
-        """アクティブ追跡確認"""
-        return (self.tracking_manager is not None 
-                and self.tracking_manager.has_active_trackers())
+        """アクティブ追跡確認（スタブ）"""
+        # TrackingManager削除 - 常にFalseを返す
+        return False

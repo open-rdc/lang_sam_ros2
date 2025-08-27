@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 LangSAM Tracker Node with Native C++ CSRT Implementation (Synchronous Version)
+ハイブリッドPython/C++実装によるリアルタイムオブジェクト追跡ノード
 """
 
 import rclpy
@@ -16,8 +17,6 @@ import time
 from lang_sam.tracker_utils.lang_sam_tracker import LangSAMTracker
 from lang_sam.models.utils import DEVICE
 from lang_sam.tracker_utils.csrt_client import CSRTClient
-from lang_sam.tracker_utils.config_manager import ConfigManager
-from lang_sam.tracker_utils.logging_manager import setup_logging_for_ros_node
 from lang_sam.utils import draw_image
 from lang_sam_wrapper.fast_processing_client import get_fast_processing_client
 
@@ -33,7 +32,9 @@ except ImportError as e:
 
 
 class Detection:
-    """検出結果クラス"""
+    """検出結果クラス
+    GroundingDINO検出結果をROS2メッセージ形式に変換する目的で使用
+    """
     def __init__(self, box, label, score=1.0):
         self.x = int(box[0])
         self.y = int(box[1])
@@ -44,65 +45,54 @@ class Detection:
 
 
 class LangSAMTrackerNode(Node):
-    """Main LangSAM node with C++ CSRT tracker integration (Synchronous Version)"""
+    """Main LangSAM node with C++ CSRT tracker integration (Synchronous Version)
+    
+    技術的な処理フロー：
+    1. GroundingDINO: テキストプロンプトベースのゼロショット物体検出（1Hz）
+    2. C++ CSRT: 高速リアルタイム追跡（全フレーム処理）
+    3. SAM2: セグメンテーションマスク生成（10Hz独立実行）
+    """
     
     def __init__(self):
         super().__init__('lang_sam_tracker_node')
         
         print(f"[INIT] LANG_SAM_MSGS_AVAILABLE at __init__: {LANG_SAM_MSGS_AVAILABLE}")
         
-        # 統一ロギングシステム初期化
-        self.logger, self.perf_logger, self.error_ctx = setup_logging_for_ros_node(self, debug=False)
+        self.logger = self.get_logger()
         self.logger.info("LangSAMトラッカーノード（C++ CSRT版）同期処理で初期化開始")
         
-        # 統一設定管理システム初期化
-        try:
-            config_manager = ConfigManager.get_instance()
-            config_path = "/home/ryusei/formula_ws/src/lang_sam_executor/config/config.yaml"
-            self.system_config = config_manager.load_from_yaml(config_path, "lang_sam_tracker_node")
-            self.logger.info("統一設定管理システム初期化完了")
-        except Exception as e:
-            self.logger.error(f"設定読み込み失敗、デフォルト設定を使用: {e}")
-            self._declare_parameters()
-            self._load_parameters()
-            self.system_config = None
+        # ROS2標準パラメータ管理で設定を読み込み
+        # config.yamlから27個のCSRTパラメータを含む全設定を管理する目的で使用
+        self._declare_parameters()
+        self._load_parameters()
+        self.logger.info("パラメータ読み込み完了")
         
         # CV Bridge を初期化
+        # ROS2画像メッセージとOpenCV画像形式の相互変換の目的で使用
         self.cv_bridge = CvBridge()
         
         # 高速処理クライアントを初期化
+        # C++実装のBGR→RGB変換とキャッシュ機構により画像処理を高速化する目的で使用
         self.fast_client = get_fast_processing_client()
         self.logger.info("高速化処理クライアント初期化完了")
         
         # LangSAMトラッカーを初期化
-        if self.system_config:
-            sam_model = self.system_config.model.sam_model
-            text_prompt = self.system_config.model.text_prompt
-            box_threshold = self.system_config.model.box_threshold
-            text_threshold = self.system_config.model.text_threshold
-            gdino_interval_seconds = self.system_config.execution.gdino_interval_seconds
-            input_topic = self.system_config.ros.input_topic
-            gdino_topic = self.system_config.ros.gdino_topic
-            csrt_output_topic = self.system_config.ros.csrt_output_topic
-            sam_topic = self.system_config.ros.sam_topic
-            tracking_targets = self.system_config.model.tracking_targets
-            bbox_margin = self.system_config.tracking.bbox_margin
-            bbox_min_size = self.system_config.tracking.bbox_min_size
-        else:
-            sam_model = self.sam_model
-            text_prompt = self.text_prompt
-            box_threshold = self.box_threshold
-            text_threshold = self.text_threshold
-            gdino_interval_seconds = self.gdino_interval_seconds
-            input_topic = self.input_topic
-            gdino_topic = self.gdino_topic
-            csrt_output_topic = self.csrt_output_topic
-            sam_topic = self.sam_topic
-            tracking_targets = self.tracking_targets
-            bbox_margin = self.bbox_margin
-            bbox_min_size = self.bbox_min_size
+        # ROS2パラメータから設定値を直接使用
+        sam_model = self.sam_model
+        text_prompt = self.text_prompt
+        box_threshold = self.box_threshold
+        text_threshold = self.text_threshold
+        gdino_interval_seconds = self.gdino_interval_seconds
+        input_topic = self.input_topic
+        gdino_topic = self.gdino_topic
+        csrt_output_topic = self.csrt_output_topic
+        sam_topic = self.sam_topic
+        tracking_targets = self.tracking_targets
+        bbox_margin = self.bbox_margin
+        bbox_min_size = self.bbox_min_size
             
         # ネイティブC++ CSRTクライアントを初期化
+        # pybind11経由でC++実装のCSRTトラッカーを利用し、リアルタイム性能を確保する目的で使用
         self.logger.info("C++ CSRTクライアント初期化開始")
         self.csrt_client = CSRTClient(self)
         
@@ -113,10 +103,11 @@ class LangSAMTrackerNode(Node):
         self.logger.info("ネイティブC++ CSRTクライアント初期化完了")
         
         # LangSAMトラッカーを初期化
+        # GroundingDINOとSAM2モデルを統合管理し、GPU推論を制御する目的で使用
         self.logger.info("LangSAMトラッカー初期化開始")
         self.lang_sam_tracker = LangSAMTracker(
-            sam_type=sam_model,
-            device=str(DEVICE)
+            sam_type=sam_model,  # SAM2モデルバリアント選択（tiny/small/base/large）
+            device=str(DEVICE)   # CUDA対応GPU自動検出
         )
         self.logger.info("LangSAMトラッカー初期化完了")
         
@@ -130,12 +121,9 @@ class LangSAMTrackerNode(Node):
         self.bbox_min_size = bbox_min_size
         
         # SAM2独立実行用設定
-        if self.system_config and hasattr(self.system_config.execution, 'sam2_interval_seconds'):
-            self.sam2_interval_seconds = self.system_config.execution.sam2_interval_seconds
-            self.sam2_independent_mode = self.system_config.execution.sam2_independent_mode
-        else:
-            self.sam2_interval_seconds = 0.1  # デフォルト10Hz
-            self.sam2_independent_mode = True
+        # CSRTトラッキングから独立して10Hzでセグメンテーションを実行する目的で使用
+        self.sam2_interval_seconds = 0.1  # デフォルト10Hz
+        self.sam2_independent_mode = True
         
         # タイミング制御
         self.last_gdino_time = 0.0
@@ -143,9 +131,10 @@ class LangSAMTrackerNode(Node):
         self.frame_count = 0
         
         # CSRTトラッキング結果のキャッシュ（SAM2独立実行用）
-        self.cached_csrt_results = []
-        self.cached_csrt_labels = []
-        self.cached_image = None
+        # 非同期でSAM2が最新のトラッキング結果を参照できるようにする目的で使用
+        self.cached_csrt_results = []  # バウンディングボックス座標
+        self.cached_csrt_labels = []   # オブジェクトラベル
+        self.cached_image = None       # 最新フレーム画像
         
         # パブリッシャー
         self.gdino_pub = self.create_publisher(Image, gdino_topic, 10)
@@ -245,7 +234,13 @@ class LangSAMTrackerNode(Node):
         self.bbox_min_size = self.get_parameter('bbox_min_size').value
     
     def image_callback(self, msg: Image):
-        """同期画像処理コールバック"""
+        """同期画像処理コールバック
+        
+        処理タイミング制御：
+        - GroundingDINO: gdino_interval_seconds間隔で実行（デフォルト1.0秒）
+        - CSRT: 毎フレーム実行（リアルタイム追跡）  
+        - SAM2: sam2_interval_seconds間隔で独立実行（デフォルト0.1秒）
+        """
         self.logger.info(f"画像コールバック開始: フレーム{self.frame_count + 1}")
         
         try:
@@ -292,12 +287,17 @@ class LangSAMTrackerNode(Node):
             traceback.print_exc()
     
     def _run_grounding_dino_detection(self, image: np.ndarray) -> list:
-        """GroundingDINO同期検出実行"""
+        """GroundingDINO同期検出実行
+        
+        テキストプロンプトから物体を検出する目的で使用
+        box_threshold/text_thresholdにより検出精度を制御
+        """
         try:
             from PIL import Image as PILImage
             import cv2
             
             # C++高速BGR→RGB変換（キャッシュあり）
+            # OpenCV形式（BGR）をPIL/AI モデル用（RGB）に変換する目的で使用
             rgb_image = self.fast_client.bgr_to_rgb_cached(image)
             pil_image = PILImage.fromarray(rgb_image)
             
@@ -344,7 +344,11 @@ class LangSAMTrackerNode(Node):
         return detections
     
     def _apply_detection_results(self, detections: list, current_image: np.ndarray, header):
-        """検出結果の適用処理"""
+        """検出結果の適用処理
+        
+        GroundingDINO検出結果をC++ CSRTトラッカーに登録する目的で使用
+        tracking_targetsリストでフィルタリング
+        """
         # C++ CSRTトラッカー初期化
         detection_boxes = []
         detection_labels = []
@@ -360,6 +364,7 @@ class LangSAMTrackerNode(Node):
         
         if detection_boxes:
             # C++ CSRT初期化
+            # 新規検出オブジェクトのトラッカーを作成し、既存トラッカーを更新する目的で使用
             csrt_results = self.csrt_client.process_detections(
                 current_image, detection_boxes, detection_labels
             )
@@ -371,7 +376,11 @@ class LangSAMTrackerNode(Node):
             # Note: Detection results will be published after SAM2 processing completes with masks
     
     def _process_csrt_tracking(self, image: np.ndarray, header):
-        """CSRT継続トラッキング処理"""
+        """CSRT継続トラッキング処理
+        
+        毎フレーム実行されるリアルタイム追跡処理
+        C++実装により高速化を実現する目的で使用
+        """
         # CSRT更新
         csrt_results = self.csrt_client.update_trackers(image)
         
@@ -513,7 +522,11 @@ class LangSAMTrackerNode(Node):
             self.sam_pub.publish(sam_msg)
     
     def _run_sam2_segmentation(self, image: np.ndarray, pil_image, boxes: list, labels: list):
-        """SAM2セグメンテーション実行 (draw_image使用)"""
+        """SAM2セグメンテーション実行 (draw_image使用)
+        
+        バウンディングボックスからピクセルレベルのセグメンテーションマスクを生成する目的で使用
+        SAM2のゼロショット能力により事前学習なしで動作
+        """
         try:
             # ModelCoordinatorのSAMにアクセス
             sam_predictor = self.lang_sam_tracker.coordinator.sam
@@ -537,6 +550,7 @@ class LangSAMTrackerNode(Node):
                     xyxy_box = np.array([x1, y1, x2, y2])
                     
                     # SAM2推論
+                    # Transformerベースのセグメンテーションモデルで高精度マスク生成する目的で使用
                     sam_masks, scores, logits = sam_predictor.predict(image_rgb, xyxy_box)
                     
                     if sam_masks is not None and len(sam_masks) > 0:
@@ -640,6 +654,7 @@ class LangSAMTrackerNode(Node):
                     xyxy_box = np.array([x1, y1, x2, y2])
                     
                     # SAM2推論
+                    # Transformerベースのセグメンテーションモデルで高精度マスク生成する目的で使用
                     sam_masks, scores, logits = sam_predictor.predict(image_rgb, xyxy_box)
                     
                     if sam_masks is not None and len(sam_masks) > 0:
@@ -678,7 +693,11 @@ class LangSAMTrackerNode(Node):
             return self._create_bbox_visualization(image, boxes, labels), []
     
     def _process_sam_segmentation_independent(self, image: np.ndarray, header):
-        """SAM2独立実行処理（CSRTトラッキング結果を使用）"""
+        """SAM2独立実行処理（CSRTトラッキング結果を使用）
+        
+        10Hz固定レートでセグメンテーションを実行する目的で使用
+        CSRTの高速追跡とSAM2の精密セグメンテーションを分離して最適化
+        """
         try:
             if not self.cached_csrt_results:
                 # トラッキング結果なし、元画像配信
@@ -756,7 +775,11 @@ class LangSAMTrackerNode(Node):
             self.sam_pub.publish(image_msg)
     
     def _publish_detection_results(self, boxes: list, labels: list, masks: list, probs: list, header):
-        """検出結果をDetectionResultメッセージで配信"""
+        """検出結果をDetectionResultメッセージで配信
+        
+        ナビゲーションノードにセグメンテーション情報を提供する目的で使用
+        カスタムメッセージ型でボックス・マスク・ラベルを統合配信
+        """
         print(f"[PUBLISH] _publish_detection_results called with {len(boxes)} boxes, {len(labels)} labels")
         print(f"[PUBLISH] LANG_SAM_MSGS_AVAILABLE: {LANG_SAM_MSGS_AVAILABLE}")
         print(f"[PUBLISH] use_fallback_publisher: {self.use_fallback_publisher}")

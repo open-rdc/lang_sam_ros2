@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 from ..models.utils import DEVICE
 from .tracking_config import TrackingConfig
 from .model_coordinator import ModelCoordinator
-from .exceptions import LangSAMError, ErrorHandler
+# カスタム例外削除 - 標準Exception使用
 
 
 class LangSAMTracker:
@@ -87,10 +87,8 @@ class LangSAMTracker:
                 images_pil, texts_prompt, box_threshold, text_threshold,
                 update_trackers, run_sam
             )
-        except LangSAMError:
-            raise
         except Exception as e:
-            raise ErrorHandler.handle_model_error("full_pipeline", e)
+            raise RuntimeError(f"LangSAMトラッカー推論失敗: {str(e)}")
     
     def update_trackers_only(self, image_np: np.ndarray) -> Dict:
         """軽量CSRTトラッキング：30Hzリアルタイム処理特化
@@ -103,10 +101,8 @@ class LangSAMTracker:
         """
         try:
             return self.coordinator.update_tracking_only(image_np)
-        except LangSAMError:
-            raise
         except Exception as e:
-            raise ErrorHandler.handle_tracking_error("batch", "update_only", e)
+            raise RuntimeError(f"トラッキング専用モード失敗: {str(e)}")
     
     def update_trackers_with_sam(self, image_np: np.ndarray) -> Dict:
         """ハイブリッド処理：CSRT追跡+SAM2セグメンテーションの最適組み合わせ
@@ -122,10 +118,8 @@ class LangSAMTracker:
         """
         try:
             return self.coordinator.update_tracking_with_sam(image_np)
-        except LangSAMError:
-            raise
         except Exception as e:
-            raise ErrorHandler.handle_model_error("tracking_with_sam", e)
+            raise RuntimeError(f"トラッキング+セグメンテーション失敗: {str(e)}")
     
     def set_tracking_targets(self, targets: List[str]) -> None:
         """動的追跡対象設定：実行時ターゲット変更機能

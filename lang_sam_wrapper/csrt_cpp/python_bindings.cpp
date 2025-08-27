@@ -5,17 +5,25 @@
 
 namespace py = pybind11;
 
-// Helper function to convert numpy array to cv::Mat
+// Python/C++ハイブリッドアーキテクチャ用pybind11バインディング
+// ROS2システムでリアルタイム性能を実現するために
+// C++実装のCSRTトラッカーをPythonから利用可能にする目的で使用
+
+// NumPy配列からOpenCV Mat形式への変換ヘルパー関数
+// Pythonの画像データ(NumPy ndarray)をC++のOpenCV Mat形式に変換し、
+// ゼロコピーでの高速データ転送を実現する目的で使用
 cv::Mat numpy_to_mat(py::array_t<uint8_t> input) {
     py::buffer_info buf_info = input.request();
     
-    // Handle different image formats
+    // 画像フォーマット判定と適応的変換
+    // ROS2のセンサー画像メッセージに対応した柔軟な画像形式サポートを提供する目的で使用
     if (buf_info.ndim == 3 && buf_info.shape[2] == 3) {
-        // BGR image
+        // BGR画像形式：カラー画像の標準的OpenCV形式
         cv::Mat mat(buf_info.shape[0], buf_info.shape[1], CV_8UC3, (unsigned char*)buf_info.ptr);
-        return mat.clone();  // Make a copy for safety
+        return mat.clone();  // メモリ安全性確保のためのディープコピー
     } else if (buf_info.ndim == 2) {
-        // Grayscale image
+        // グレースケール画像形式：単チャンネル画像処理用
+        // CSRT内部でグレースケール変換が必要な場合に直接利用する目的で使用
         cv::Mat mat(buf_info.shape[0], buf_info.shape[1], CV_8UC1, (unsigned char*)buf_info.ptr);
         return mat.clone();
     }
@@ -25,25 +33,33 @@ cv::Mat numpy_to_mat(py::array_t<uint8_t> input) {
     return mat.clone();
 }
 
-// Helper function to convert cv::Rect2d to tuple
+// OpenCV Rect2dからPythonタプルへの変換ヘルパー関数
+// C++のバウンディングボックス座標をPython側のタプル形式に変換し、
+// ROSメッセージ形式との互換性を保つ目的で使用
 py::tuple rect_to_tuple(const cv::Rect2d& rect) {
-    return py::make_tuple(rect.x, rect.y, rect.width, rect.height);
+    return py::make_tuple(rect.x, rect.y, rect.width, rect.height); // (x, y, width, height)形式
 }
 
-// Helper function to convert tuple to cv::Rect2d
+// Pythonタプルから OpenCV Rect2dへの変換ヘルパー関数
+// Python側のバウンディングボックス座標をC++の厳密型付きRect2d形式に変換し、
+// CSRTトラッカーの初期化に使用する目的で実装
 cv::Rect2d tuple_to_rect(py::tuple t) {
     return cv::Rect2d(t[0].cast<double>(), t[1].cast<double>(), 
-                      t[2].cast<double>(), t[3].cast<double>());
+                      t[2].cast<double>(), t[3].cast<double>()); // double型へのキャスト
 }
 
 PYBIND11_MODULE(csrt_native, m) {
+    // pybind11モジュール定義：C++実装をPythonモジュールとしてエクスポート
+    // OpenCV 4.5+互換性とリカバリ機能を持つネイティブC++ CSRTトラッカー
     m.doc() = "Native C++ CSRT tracker with OpenCV 4.5+ compatibility and recovery features";
     
-    // CSRTParams struct
+    // CSRTParams構造体のPythonバインディング
+    // 27個のCSRTパラメータをPython側から動的に制御する目的で使用
+    // config.yamlからROSパラメータとして読み込み可能
     py::class_<csrt_native::CSRTParams>(m, "CSRTParams")
-        .def(py::init<>())
-        .def_readwrite("use_hog", &csrt_native::CSRTParams::use_hog)
-        .def_readwrite("use_color_names", &csrt_native::CSRTParams::use_color_names)
+        .def(py::init<>())  // デフォルトコンストラクタ
+        .def_readwrite("use_hog", &csrt_native::CSRTParams::use_hog)                     // HOG特徴量使用フラグ
+        .def_readwrite("use_color_names", &csrt_native::CSRTParams::use_color_names)     // 色名特徴量使用フラグ
         .def_readwrite("use_gray", &csrt_native::CSRTParams::use_gray)
         .def_readwrite("use_rgb", &csrt_native::CSRTParams::use_rgb)
         .def_readwrite("use_channel_weights", &csrt_native::CSRTParams::use_channel_weights)
@@ -51,8 +67,8 @@ PYBIND11_MODULE(csrt_native, m) {
         .def_readwrite("window_function", &csrt_native::CSRTParams::window_function)
         .def_readwrite("kaiser_alpha", &csrt_native::CSRTParams::kaiser_alpha)
         .def_readwrite("cheb_attenuation", &csrt_native::CSRTParams::cheb_attenuation)
-        .def_readwrite("template_size", &csrt_native::CSRTParams::template_size)
-        .def_readwrite("gsl_sigma", &csrt_native::CSRTParams::gsl_sigma)
+        .def_readwrite("template_size", &csrt_native::CSRTParams::template_size)         // テンプレートサイズ
+        .def_readwrite("gsl_sigma", &csrt_native::CSRTParams::gsl_sigma)                 // ガウシアンσ値
         .def_readwrite("hog_orientations", &csrt_native::CSRTParams::hog_orientations)
         .def_readwrite("hog_clip", &csrt_native::CSRTParams::hog_clip)
         .def_readwrite("padding", &csrt_native::CSRTParams::padding)
@@ -68,12 +84,13 @@ PYBIND11_MODULE(csrt_native, m) {
         .def_readwrite("scale_model_max_area", &csrt_native::CSRTParams::scale_model_max_area)
         .def_readwrite("scale_lr", &csrt_native::CSRTParams::scale_lr)
         .def_readwrite("scale_step", &csrt_native::CSRTParams::scale_step)
-        .def_readwrite("psr_threshold", &csrt_native::CSRTParams::psr_threshold)
-;
+        .def_readwrite("psr_threshold", &csrt_native::CSRTParams::psr_threshold)         // PSR閾値：追跡信頼度判定
+    ;  // CSRTParamsクラス定義終了
     
-    // CSRTTrackerNative
+    // CSRTTrackerNativeクラスのPythonバインディング
+    // 単一オブジェクト追跡用のC++ネイティブCSRTトラッカーをPythonから操作する目的で使用
     py::class_<csrt_native::CSRTTrackerNative>(m, "CSRTTrackerNative")
-        .def(py::init<const std::string&, const csrt_native::CSRTParams&>())
+        .def(py::init<const std::string&, const csrt_native::CSRTParams&>())  // コンストラクタ（ラベル、パラメータ）
         .def("initialize", [](csrt_native::CSRTTrackerNative& self, py::array_t<uint8_t> image, py::tuple bbox) {
             cv::Mat mat = numpy_to_mat(image);
             cv::Rect2d rect = tuple_to_rect(bbox);
