@@ -18,7 +18,6 @@ from lang_sam.tracker_utils.lang_sam_tracker import LangSAMTracker
 from lang_sam.models.utils import DEVICE
 from lang_sam.tracker_utils.csrt_client import CSRTClient
 from lang_sam.utils import draw_image
-from lang_sam_wrapper.fast_processing_client import get_fast_processing_client
 
 # カスタムメッセージ型をインポート
 try:
@@ -71,10 +70,7 @@ class LangSAMTrackerNode(Node):
         # ROS2画像メッセージとOpenCV画像形式の相互変換の目的で使用
         self.cv_bridge = CvBridge()
         
-        # 高速処理クライアントを初期化
-        # C++実装のBGR→RGB変換とキャッシュ機構により画像処理を高速化する目的で使用
-        self.fast_client = get_fast_processing_client()
-        self.logger.info("高速化処理クライアント初期化完了")
+        # OpenCVを直接使用してシンプル化（fast_processing_client削除）
         
         # LangSAMトラッカーを初期化
         # ROS2パラメータから設定値を直接使用
@@ -193,9 +189,7 @@ class LangSAMTrackerNode(Node):
         
         self.logger.info("LangSAMトラッカーノード初期化完了（同期処理版 + C++高速化）")
         
-        # 高速化統計情報をログ出力
-        cache_size = self.fast_client.get_cache_size()
-        self.logger.info(f"高速化統計: キャッシュサイズ={cache_size}")
+        # 初期化完了ログ
     
     def _declare_parameters(self):
         """Declare parameters (fallback)"""
@@ -296,9 +290,9 @@ class LangSAMTrackerNode(Node):
             from PIL import Image as PILImage
             import cv2
             
-            # C++高速BGR→RGB変換（キャッシュあり）
-            # OpenCV形式（BGR）をPIL/AI モデル用（RGB）に変換する目的で使用
-            rgb_image = self.fast_client.bgr_to_rgb_cached(image)
+            # BGR→RGB変換（OpenCV直接使用）
+            # OpenCV形式（BGR）をPIL/AIモデル用（RGB）に変換する目的で使用
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             pil_image = PILImage.fromarray(rgb_image)
             
             start_time = time.time()
