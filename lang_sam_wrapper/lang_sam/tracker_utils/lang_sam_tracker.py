@@ -11,7 +11,6 @@ from PIL import Image
 from typing import Dict, List, Optional
 
 from ..models.utils import DEVICE
-from .tracking_config import TrackingConfig
 from .model_coordinator import ModelCoordinator
 # カスタム例外削除 - 標準Exception使用
 

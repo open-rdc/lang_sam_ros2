@@ -14,7 +14,7 @@ from ..models.gdino import GDINO
 from ..models.sam import SAM
 from ..models.utils import DEVICE
 # TrackingManager削除 - C++ CSRTClient使用のため
-from .tracking_config import TrackingConfig
+# TrackingConfig削除 - config.yamlで管理
 # カスタム例外削除 - 標準Exception使用
 import logging  # 標準Pythonロギングを使用 - logging_manager.py削除
 
@@ -49,7 +49,14 @@ class ModelCoordinator:
         
         # TrackingManager削除 - C++ CSRTClient使用のため
         self.tracking_manager = None  # 後方互換性のためNoneを保持
-        self.tracking_config = TrackingConfig()
+        # TrackingConfig削除 - config.yamlで管理
+        # 後方互換性のためダミー属性を追加（config.yamlの値で実際は管理）
+        self.tracking_config = type('TrackingConfig', (), {
+            'bbox_margin': 5,
+            'bbox_min_size': 3,
+            'tracker_min_size': 3,
+            'update': lambda self, **kwargs: None
+        })()
     
     def _initialize_sam(self, sam_type: str, ckpt_path: Optional[str], device) -> SAM:
         """SAM2モデル初期化：ビジョントランスフォーマーベースのセグメンテーション
@@ -98,7 +105,8 @@ class ModelCoordinator:
         - 24パラメータによるトラッキング精度の詳細調整
         """
         if tracking_config:
-            self.tracking_config.update(**tracking_config)
+            # config.yamlで管理されるため、ここでは何もしない
+            pass
         
         self.logger.info(f"トラッキングシステム初期化開始: targets={tracking_targets}")
         
