@@ -1,6 +1,11 @@
 /*
  * マルチビューノード C++実装
  * 4分割画像表示ノード（高性能C++版）
+ * 
+ * 技術的目的:
+ * - GroundingDINO/CSRT/SAM2の結果を統合表示する目的で使用
+ * - 高速画像合成とリアルタイム配信を実現する目的でC++実装
+ * - ROS2メッセージングでモジュラーシステムを構築する目的で実装
  */
 
 #include <rclcpp/rclcpp.hpp>
@@ -15,6 +20,8 @@
 #include <chrono>
 #include <deque>
 
+// 频度モニタリングクラス
+// 目的: 各視覚化トピックのフレームレートをリアルタイムで計測
 class FrequencyMonitor {
 public:
     FrequencyMonitor(size_t window_size = 300) : window_size_(window_size) {}
@@ -25,11 +32,13 @@ public:
         timestamps_.push_back(now);
         
         // 古いタイムスタンプを削除
+        // 目的: メモリ使用量を制限して安定動作を維持
         if (timestamps_.size() > window_size_) {
             timestamps_.pop_front();
         }
         
         // 周波数計算
+        // 目的: リアルタイムでシステムのパフォーマンスを監視
         if (timestamps_.size() >= 2) {
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                 timestamps_.back() - timestamps_.front()).count();

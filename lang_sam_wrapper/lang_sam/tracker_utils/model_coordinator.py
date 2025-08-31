@@ -14,9 +14,12 @@ from ..models.gdino import GDINO
 from ..models.sam import SAM
 from ..models.utils import DEVICE
 # TrackingManager削除 - C++ CSRTClient使用のため
+# pybind11でバインディングしたC++実装で高速追跡を実現する目的で使用
 # TrackingConfig削除 - config.yamlで管理
+# 27個のCSRTパラメータをROS2パラメータで一元管理する目的で変更
 # カスタム例外削除 - 標準Exception使用
 import logging  # 標準Pythonロギングを使用 - logging_manager.py削除
+# 輕量なログ出力でパフォーマンス影響を最小化する目的で使用
 
 # デバッグモード制御は統一ロギングシステムで管理
 
@@ -44,6 +47,8 @@ class ModelCoordinator:
         else:
             self.logger.setLevel(logging.INFO)
         
+        # AIモデル初期化（GPUメモリ上にモデル重みを読み込み）
+        # SAM2とGroundingDINOを組み合わせたゼロショットセグメンテーションを実現する目的で使用
         self.sam = self._initialize_sam(sam_type, ckpt_path, device)
         self.gdino = self._initialize_gdino(device)
         

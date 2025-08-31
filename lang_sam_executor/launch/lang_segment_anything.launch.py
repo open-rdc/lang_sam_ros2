@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
 Launch file for LangSAM with Native C++ CSRT Tracker
+
+技術的目的:
+- ハイブリッドPython/C++システムの統合起動を管理する目的で使用
+- メインAI/MLノードとマルチビュー可視化ノードの協調動作を実現
+- デバッグモードと本番モードの柔軟な切り替えを提供する目的で実装
 """
 
 import os
@@ -13,11 +18,13 @@ from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
-    # パッケージディレクトリ
+    # パッケージディレクトリ読み込み
+    # 目的: config.yamlの絶対パスを解決しROS2パラメータとして読み込み
     lang_sam_executor_dir = get_package_share_directory('lang_sam_executor')
     config_file = os.path.join(lang_sam_executor_dir, 'config', 'config.yaml')
     
-    # 起動引数
+    # 起動引数定義
+    # 目的: コマンドラインからデバッグモードや設定ファイルを動的に切り替え
     debug_arg = DeclareLaunchArgument(
         'debug',
         default_value='false',

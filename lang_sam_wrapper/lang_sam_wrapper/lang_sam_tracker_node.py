@@ -2,6 +2,11 @@
 """
 LangSAM Tracker Node with Native C++ CSRT Implementation (Synchronous Version)
 ハイブリッドPython/C++実装によるリアルタイムオブジェクト追跡ノード
+
+技術的目的：
+- ゼロショット物体検出とリアルタイム追跡の統合の目的で使用
+- Pythonの柔軟性とC++の高速性を組み合わせる目的で実装
+- ROS2メッセージングを通じたモジュラーシステム構築の目的で設計
 """
 
 import rclpy
@@ -20,6 +25,7 @@ from lang_sam.tracker_utils.csrt_client import CSRTClient
 from lang_sam.utils import draw_image
 
 # カスタムメッセージ型をインポート
+# 検出結果とセグメンテーションマスクを構造化された形式で配信する目的で使用
 try:
     from lang_sam_msgs.msg import DetectionResult
     from geometry_msgs.msg import Polygon, Point32
@@ -48,8 +54,11 @@ class LangSAMTrackerNode(Node):
     
     技術的な処理フロー：
     1. GroundingDINO: テキストプロンプトベースのゼロショット物体検出（1Hz）
-    2. C++ CSRT: 高速リアルタイム追跡（全フレーム処理）
+       - TransformerベースのDETRアーキテクチャで自然言語理解の目的で使用
+    2. C++ CSRT: 高速リアルタイム追跡（全フレーム処理）  
+       - 判別的相関フィルタ(DCF)で高精度追跡を実現する目的で使用
     3. SAM2: セグメンテーションマスク生成（10Hz独立実行）
+       - Vision Transformerでピクセルレベルセグメンテーションの目的で使用
     """
     
     def __init__(self):
@@ -71,9 +80,10 @@ class LangSAMTrackerNode(Node):
         self.cv_bridge = CvBridge()
         
         # OpenCVを直接使用してシンプル化（fast_processing_client削除）
+        # BGR/RGB変換はオーバーヘッドが小さいため直接OpenCVを使用する目的で変更
         
         # LangSAMトラッカーを初期化
-        # ROS2パラメータから設定値を直接使用
+        # config.yamlから読み込んだROS2パラメータをAI/MLモデルに適用する目的で使用
         sam_model = self.sam_model
         text_prompt = self.text_prompt
         box_threshold = self.box_threshold
@@ -268,6 +278,7 @@ class LangSAMTrackerNode(Node):
             self._process_csrt_tracking(image, msg.header)
             
             # SAM2セグメンテーション（独立実行モード）
+            # CSRT追跡結果を元に10Hzでセグメンテーションを実行する目的で使用
             if self.sam2_independent_mode:
                 should_run_sam2 = (current_time - self.last_sam2_time) >= self.sam2_interval_seconds
                 if should_run_sam2 and self.cached_csrt_results:
@@ -320,7 +331,11 @@ class LangSAMTrackerNode(Node):
             return []
     
     def _parse_detection_results(self, results) -> list:
-        """検出結果解析"""
+        """検出結果解析
+        
+        GroundingDINOの出力をDetectionオブジェクトに変換する目的で使用
+        ラベルとバウンディングボックスをマッピングする目的で実装
+        """
         detections = []
         
         if results and len(results) > 0:

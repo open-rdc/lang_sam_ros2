@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <cctype>
 
+// CSRTネイティブトラッカーC++実装
+// 目的: Python/ROS2システムで高速リアルタイム追跡を実現
+// OpenCV 4.5+互換性とリカバリ機能を提供する目的で使用
+
 namespace csrt_native {
 
 CSRTTrackerNative::CSRTTrackerNative(const std::string& tracker_id, const CSRTParams& params)
@@ -17,7 +21,8 @@ void CSRTTrackerNative::create_tracker_with_params() {
     try {
         cv::TrackerCSRT::Params csrt_params;
         
-        // Apply parameters from config.yaml
+        // config.yamlから読み込んた27個のCSRTパラメータを適用
+        // 目的: 高精度追跡とリアルタイム性能のバランス最適化
         csrt_params.use_hog = params_.use_hog;
         csrt_params.use_gray = params_.use_gray;
         csrt_params.use_segmentation = params_.use_segmentation;
@@ -28,7 +33,8 @@ void CSRTTrackerNative::create_tracker_with_params() {
         csrt_params.filter_lr = params_.filter_lr;
         csrt_params.weights_lr = params_.weights_lr;
         
-        // Create tracker with custom parameters
+        // カスタムパラメータでCSRTトラッカーを作成
+        // 目的: 判別的相関フィルタ(DCF)アルゴリズムで高精度追跡を実現
         tracker_ = cv::TrackerCSRT::create(csrt_params);
         
         std::cout << "[" << tracker_id_ << "] ✅ CSRT tracker created with config.yaml parameters" << std::endl;
@@ -45,7 +51,8 @@ bool CSRTTrackerNative::initialize(const cv::Mat& image, const cv::Rect2d& bbox)
     }
     
     try {
-        // Validate bbox
+        // バウンディングボックスの有効性検証
+        // 目的: 不正な座標でのクラッシュを防止
         if (bbox.width <= 2 || bbox.height <= 2 || 
             bbox.x < 0 || bbox.y < 0 ||
             bbox.x + bbox.width > image.cols || 
@@ -55,7 +62,8 @@ bool CSRTTrackerNative::initialize(const cv::Mat& image, const cv::Rect2d& bbox)
             return false;
         }
         
-        // Initialize tracker (OpenCV 4.5+ init() returns void)
+        // トラッカー初期化（OpenCV 4.5+でinit()はvoid返り）
+        // 目的: 最初のフレームでテンプレートを作成し追跡を開始
         tracker_->init(image, bbox);
         initialized_ = true;
         

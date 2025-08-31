@@ -1,18 +1,24 @@
+# LangSAM ROS2 システム統合設定ファイル
+# 技術的目的: ゼロショット物体検出、リアルタイム追跡、セグメンテーションの統合システム構築
 lang_sam_tracker_node:
   ros__parameters:
     # ===== AIモデル設定 =====
+    # 目的: GroundingDINO/SAM2モデルの選択と闾値設定で精度を制御
     sam_model: "sam2.1_hiera_tiny"  # SAM2モデル（tiny/small/base/large）
     text_prompt: "white line. red pylon. human. car."  # GroundingDINO検出プロンプト
+    # 目的: 自然言語で物体を指定してゼロショット検出を実現
     box_threshold: 0.3  # GroundingDINO BoundingBox信頼度閾値
     text_threshold: 0.25  # GroundingDINO テキスト類似度閾値
     tracking_targets: ["white line", "red pylon", "human", "car"]  # CSRT追跡対象
     
     # ===== 実行周波数設定 =====
+    # 目的: GPUメモリ使用量とリアルタイム性のバランス最適化
     gdino_interval_seconds: 1.0  # GroundingDINO実行間隔（2.0秒 = 0.5Hz）
     sam2_interval_seconds: 0.1   # SAM2セグメンテーション実行間隔（0.1秒 = 10Hz）
     sam2_independent_mode: true  # SAM2独立実行モード（CSRTトラッキング結果を使用）
     
     # ===== ROS2トピック設定 =====
+    # 目的: モジュラーシステム構築で各コンポーネントを分離
     # input_topic: "/image_raw"  # 入力画像（simulator）
     input_topic: "/zed/zed_node/rgb/image_rect_color"  # 入力画像（ZEDカメラ）
     gdino_topic: "/image_gdino"    # GroundingDINO検出結果配信
@@ -20,12 +26,14 @@ lang_sam_tracker_node:
     sam_topic: "/image_sam"        # SAM2セグメンテーション結果配信
     
     # ===== トラッキング設定 =====
+    # 目的: バウンディングボックスの安定性と精度のバランス調整
     bbox_margin: 5                 # BoundingBox境界マージン（ピクセル）
     bbox_min_size: 3               # 最小BoundingBoxサイズ（ピクセル）- 小さなBBOXも許可
     tracker_min_size: 3            # トラッカー継続最小サイズ（ピクセル）- 小さなBBOXも継続
     
     
     # ===== CSRTトラッカー内部パラメータ =====
+    # 技術的目的: 判別的相関フィルタ(DCF)アルゴリズムの27個パラメータで高精度追跡を実現
     # デフォルト値は速度重視設定。精度向上時はHOG/グレースケール/セグメンテーション有効化
     csrt_use_hog: true                    # HOG特徴量（デフォルト：true、false時は速度向上）
     csrt_use_color_names: true           # 色名特徴量（デフォルト：false、true時は精度向上・計算量増）
