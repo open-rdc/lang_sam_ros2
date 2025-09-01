@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Native C++ CSRT Tracker Client with ROS Parameter Integration
-C++実装のCSRTトラッカーへのPythonインターフェースを提供するクライアント
-"""
+"""Native C++ CSRT Tracker Client"""
 
 import rclpy
 from rclpy.node import Node
