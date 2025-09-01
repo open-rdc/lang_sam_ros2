@@ -34,11 +34,6 @@ add_library(csrt_native MODULE
   csrt_cpp/python_bindings.cpp
 )
 
-# Create pybind11 module for fast processing (sync only)
-add_library(fast_processing MODULE
-  csrt_cpp/image_processor.cpp
-  csrt_cpp/fast_bindings.cpp
-)
 
 # Set pybind11 properties for csrt_native
 target_link_libraries(csrt_native PRIVATE pybind11::module)
@@ -46,22 +41,15 @@ set_target_properties(csrt_native PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}"
                                              SUFFIX "${PYTHON_MODULE_EXTENSION}")
 pybind11_extension(csrt_native)
 
-# Set pybind11 properties for fast_processing
-target_link_libraries(fast_processing PRIVATE pybind11::module)
-set_target_properties(fast_processing PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}"
-                                                 SUFFIX "${PYTHON_MODULE_EXTENSION}")
-pybind11_extension(fast_processing)
 
 # Link OpenCV libraries
 target_link_libraries(csrt_native PRIVATE ${OpenCV_LIBS})
-target_link_libraries(fast_processing PRIVATE ${OpenCV_LIBS} Threads::Threads)
 
 # Compiler definitions
 target_compile_definitions(csrt_native PRIVATE VERSION_INFO="dev")
-target_compile_definitions(fast_processing PRIVATE VERSION_INFO="dev")
 
 # Install the pybind11 modules
-install(TARGETS csrt_native fast_processing
+install(TARGETS csrt_native
   DESTINATION "${PYTHON_INSTALL_DIR}/${PROJECT_NAME}"
 )
 

@@ -64,7 +64,6 @@ class LangSAMTrackerNode(Node):
     def __init__(self):
         super().__init__('lang_sam_tracker_node')
         
-        print(f"[INIT] LANG_SAM_MSGS_AVAILABLE at __init__: {LANG_SAM_MSGS_AVAILABLE}")
         
         self.logger = self.get_logger()
         self.logger.info("LangSAMトラッカーノード（C++ CSRT版）同期処理で初期化開始")
@@ -79,23 +78,7 @@ class LangSAMTrackerNode(Node):
         # ROS2画像メッセージとOpenCV画像形式の相互変換の目的で使用
         self.cv_bridge = CvBridge()
         
-        # OpenCVを直接使用してシンプル化（fast_processing_client削除）
-        # BGR/RGB変換はオーバーヘッドが小さいため直接OpenCVを使用する目的で変更
         
-        # LangSAMトラッカーを初期化
-        # config.yamlから読み込んだROS2パラメータをAI/MLモデルに適用する目的で使用
-        sam_model = self.sam_model
-        text_prompt = self.text_prompt
-        box_threshold = self.box_threshold
-        text_threshold = self.text_threshold
-        gdino_interval_seconds = self.gdino_interval_seconds
-        input_topic = self.input_topic
-        gdino_topic = self.gdino_topic
-        csrt_output_topic = self.csrt_output_topic
-        sam_topic = self.sam_topic
-        tracking_targets = self.tracking_targets
-        bbox_margin = self.bbox_margin
-        bbox_min_size = self.bbox_min_size
             
         # ネイティブC++ CSRTクライアントを初期化
         # pybind11経由でC++実装のCSRTトラッカーを利用し、リアルタイム性能を確保する目的で使用
@@ -112,19 +95,10 @@ class LangSAMTrackerNode(Node):
         # GroundingDINOとSAM2モデルを統合管理し、GPU推論を制御する目的で使用
         self.logger.info("LangSAMトラッカー初期化開始")
         self.lang_sam_tracker = LangSAMTracker(
-            sam_type=sam_model,  # SAM2モデルバリアント選択（tiny/small/base/large）
+            sam_type=self.sam_model,  # SAM2モデルバリアント選択（tiny/small/base/large）
             device=str(DEVICE)   # CUDA対応GPU自動検出
         )
         self.logger.info("LangSAMトラッカー初期化完了")
-        
-        # 設定を保存
-        self.text_prompt = text_prompt
-        self.box_threshold = box_threshold
-        self.text_threshold = text_threshold
-        self.gdino_interval_seconds = gdino_interval_seconds
-        self.tracking_targets = tracking_targets
-        self.bbox_margin = bbox_margin
-        self.bbox_min_size = bbox_min_size
         
         # SAM2独立実行用設定
         # CSRTトラッキングから独立して10Hzでセグメンテーションを実行する目的で使用
@@ -143,63 +117,36 @@ class LangSAMTrackerNode(Node):
         self.cached_image = None       # 最新フレーム画像
         
         # パブリッシャー
-        self.gdino_pub = self.create_publisher(Image, gdino_topic, 10)
-        self.csrt_pub = self.create_publisher(Image, csrt_output_topic, 10)
-        self.sam_pub = self.create_publisher(Image, sam_topic, 10)
+        self.gdino_pub = self.create_publisher(Image, self.gdino_topic, 10)
+        self.csrt_pub = self.create_publisher(Image, self.csrt_output_topic, 10)
+        self.sam_pub = self.create_publisher(Image, self.sam_topic, 10)
         
-        # Detection results publisher for navigation (always create regardless of lang_sam_msgs)
-        print(f"\n=== PUBLISHER CREATION DEBUG ===")
-        print(f"[PUBLISHER] Creating DetectionResult publisher, LANG_SAM_MSGS_AVAILABLE: {LANG_SAM_MSGS_AVAILABLE}")
-        print(f"[PUBLISHER] DetectionResult class available: {DetectionResult if LANG_SAM_MSGS_AVAILABLE else 'NOT AVAILABLE'}")
-        self.logger.info(f"LANG_SAM_MSGS_AVAILABLE: {LANG_SAM_MSGS_AVAILABLE}")
         
         if LANG_SAM_MSGS_AVAILABLE:
             try:
                 self.detection_pub = self.create_publisher(DetectionResult, '/lang_sam_detections', 10)
-                print("[PUBLISHER] ✓ DetectionResult publisher created successfully on /lang_sam_detections")
-                self.logger.info("✓ DetectionResult publisher created on /lang_sam_detections")
                 self.use_fallback_publisher = False
             except Exception as e:
-                print(f"[PUBLISHER] ✗ Failed to create DetectionResult publisher: {e}")
                 self.logger.error(f"Failed to create DetectionResult publisher: {e}")
                 self.use_fallback_publisher = True
-                # Fall through to fallback creation
         else:
             self.use_fallback_publisher = True
         
         if self.use_fallback_publisher:
-            # Fallback: use standard ROS2 messages for compatibility
-            print("[PUBLISHER] Creating fallback String publisher...")
-            from sensor_msgs.msg import CompressedImage
-            from std_msgs.msg import Header, String
+            from std_msgs.msg import String
             self.detection_pub = self.create_publisher(String, '/lang_sam_detections_simple', 10)
-            print("[PUBLISHER] ✓ Fallback String publisher created on /lang_sam_detections_simple")
             self.logger.info("✓ Fallback String publisher created for lane following")
         
-        print(f"=== PUBLISHER CREATION COMPLETE ===\n")
         
         # サブスクライバー
-        self.logger.info(f"画像サブスクリプション作成開始: {input_topic}")
         self.image_sub = self.create_subscription(
             Image,
-            input_topic,
+            self.input_topic,
             self.image_callback,
             10
         )
-        self.logger.info(f"画像サブスクリプション作成完了: {input_topic}")
-        
-        # 現在のトラッキング状態
-        self.current_detection_labels = []
-        
-        # 配信用の検出結果キャッシュ
-        self.last_detection_boxes = []
-        self.last_detection_labels = []
-        self.last_detection_masks = []
-        self.last_detection_probs = []
         
         self.logger.info("LangSAMトラッカーノード初期化完了（同期処理版 + C++高速化）")
-        
-        # 初期化完了ログ
     
     def _declare_parameters(self):
         """Declare parameters (fallback)"""
@@ -245,7 +192,6 @@ class LangSAMTrackerNode(Node):
         - CSRT: 毎フレーム実行（リアルタイム追跡）  
         - SAM2: sam2_interval_seconds間隔で独立実行（デフォルト0.1秒）
         """
-        self.logger.info(f"画像コールバック開始: フレーム{self.frame_count + 1}")
         
         try:
             # ROS画像をOpenCVへ変換
@@ -259,7 +205,6 @@ class LangSAMTrackerNode(Node):
             # GroundingDINO検出（同期処理）
             should_run_gdino = (current_time - self.last_gdino_time) >= self.gdino_interval_seconds
             
-            self.logger.debug(f"GDINO判定: current={current_time:.3f}, last={self.last_gdino_time:.3f}, interval={self.gdino_interval_seconds}, should_run={should_run_gdino}")
             
             if should_run_gdino:
                 self.logger.info(f"フレーム{self.frame_count}: GroundingDINO同期検出開始")
@@ -361,15 +306,12 @@ class LangSAMTrackerNode(Node):
         # C++ CSRTトラッカー初期化
         detection_boxes = []
         detection_labels = []
-        detection_boxes_for_msg = []  # For message publishing
         
         for det in detections:
             if hasattr(det, 'label') and det.label in self.tracking_targets:
                 bbox = (det.x, det.y, det.width, det.height)
                 detection_boxes.append(bbox)
                 detection_labels.append(det.label)
-                # Convert to [x1, y1, x2, y2] format for message
-                detection_boxes_for_msg.append([det.x, det.y, det.x + det.width, det.y + det.height])
         
         if detection_boxes:
             # C++ CSRT初期化
@@ -378,11 +320,6 @@ class LangSAMTrackerNode(Node):
                 current_image, detection_boxes, detection_labels
             )
             self.logger.info(f"C++ CSRT初期化完了: {len(csrt_results)}トラッカー")
-            
-            # 検出結果ラベル保存
-            self.current_detection_labels = detection_labels.copy()
-            
-            # Note: Detection results will be published after SAM2 processing completes with masks
     
     def _process_csrt_tracking(self, image: np.ndarray, header):
         """CSRT継続トラッキング処理
@@ -597,15 +534,6 @@ class LangSAMTrackerNode(Node):
             self.logger.warning(f"SAM2セグメンテーションエラー: {e}")
             return self._create_bbox_visualization(image, boxes, labels)
     
-    def _get_label_color(self, label: str):
-        """ラベル別の色を取得"""
-        colors = {
-            'white line': [0, 255, 0],      # 緑
-            'red pylon': [0, 0, 255],       # 赤
-            'car': [255, 0, 0],             # 青
-            'human': [255, 255, 0],         # シアン
-        }
-        return colors.get(label, [255, 255, 255])  # デフォルトは白
     
     def _create_bbox_visualization(self, image: np.ndarray, boxes: list, labels: list):
         """バウンディングボックス可視化（SAM2の代替表示）"""
@@ -740,12 +668,6 @@ class LangSAMTrackerNode(Node):
                     for i, mask in enumerate(masks):
                         self.logger.debug(f"マスク{i}: shape={mask.shape}, dtype={mask.dtype}")
                     
-                    self._cache_detection_results(
-                        boxes=boxes,
-                        labels=self.cached_csrt_labels,
-                        masks=masks,
-                        probs=[1.0] * len(boxes)
-                    )
                     
                     # Publish updated detection results with masks
                     self._publish_detection_results(
@@ -789,22 +711,12 @@ class LangSAMTrackerNode(Node):
         ナビゲーションノードにセグメンテーション情報を提供する目的で使用
         カスタムメッセージ型でボックス・マスク・ラベルを統合配信
         """
-        print(f"[PUBLISH] _publish_detection_results called with {len(boxes)} boxes, {len(labels)} labels")
-        print(f"[PUBLISH] LANG_SAM_MSGS_AVAILABLE: {LANG_SAM_MSGS_AVAILABLE}")
-        print(f"[PUBLISH] use_fallback_publisher: {self.use_fallback_publisher}")
-        print(f"[PUBLISH] detection_pub is None: {self.detection_pub is None}")
         
         if self.use_fallback_publisher:
-            print("[PUBLISH] Using fallback String publisher")
-            self.logger.warn("Using fallback String publisher")
             self._publish_detection_results_fallback(boxes, labels, masks, probs, header)
             return
         if self.detection_pub is None:
-            print("[PUBLISH] Detection publisher is None, skipping")
-            self.logger.warn("Detection publisher is None, skipping detection publish")
             return
-        
-        print("[PUBLISH] Using DetectionResult publisher")
             
         try:
             # Create DetectionResult message
@@ -871,14 +783,10 @@ class LangSAMTrackerNode(Node):
                     mask_msg.header = header
                     detection_msg.masks.append(mask_msg)
             
-            # Publish the detection result
-            print(f"[PUBLISH] About to publish DetectionResult message")
             try:
                 self.detection_pub.publish(detection_msg)
-                print(f"[PUBLISH] ✓ DetectionResult message published successfully")
                 self.logger.info(f"検出結果配信完了: {len(boxes)}ボックス, {len(detection_msg.masks)}マスク, {len(labels)}ラベル")
             except Exception as publish_e:
-                print(f"[PUBLISH] ✗ Failed to publish DetectionResult: {publish_e}")
                 self.logger.error(f"Failed to publish DetectionResult: {publish_e}")
                 raise
             
@@ -887,8 +795,6 @@ class LangSAMTrackerNode(Node):
     
     def _publish_detection_results_fallback(self, boxes: list, labels: list, masks: list, probs: list, header):
         """Fallback: 検出結果をStringメッセージで配信"""
-        print(f"[FALLBACK] Starting fallback detection publishing with {len(boxes)} boxes, {len(labels)} labels")
-        self.logger.info(f"[FALLBACK] Publishing detection results via String message: {len(boxes)} detections")
         
         try:
             import json
@@ -935,21 +841,12 @@ class LangSAMTrackerNode(Node):
             string_msg = String()
             string_msg.data = json_str
             
-            print(f"[FALLBACK] Publishing JSON string with {len(json_str)} characters")
-            print(f"[FALLBACK] JSON preview: {json_str[:200]}...")
             self.detection_pub.publish(string_msg)
-            print(f"[FALLBACK] ✓ Message published successfully")
             self.logger.info(f"[FALLBACK] 検出結果配信完了: {len(boxes)}ボックス, {len(white_line_masks)}白線マスク, {len(labels)}ラベル")
             
         except Exception as e:
             self.logger.error(f"[FALLBACK] 検出結果配信エラー: {e}")
     
-    def _cache_detection_results(self, boxes: list, labels: list, masks: list = None, probs: list = None):
-        """検出結果をキャッシュ"""
-        self.last_detection_boxes = boxes.copy() if boxes else []
-        self.last_detection_labels = labels.copy() if labels else []
-        self.last_detection_masks = masks.copy() if masks else []
-        self.last_detection_probs = probs.copy() if probs else [1.0] * len(boxes)
     
     def __del__(self):
         """デストラクタ"""

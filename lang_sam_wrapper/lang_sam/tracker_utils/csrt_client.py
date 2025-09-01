@@ -32,7 +32,6 @@ class CSRTClient:
     def __init__(self, node: Node):
         self.node = node
         self.logger = node.get_logger()
-        # ラベルキャッシュ：C++側への無駄なメソッド呼び出しを削減する目的で使用
         self._cached_labels = []
         
         if not NATIVE_AVAILABLE:
@@ -40,15 +39,8 @@ class CSRTClient:
             self.manager = None
             return
             
-        # ROSパラメータからCSRT設定を初期化
-        # config.yamlから動的にパラメータを読み込みC++側に伝達する目的で使用
         self.params = self._load_params_from_ros()
-        # C++ CSRTマネージャー初期化：複数トラッカーを統合管理する目的で使用
         self.manager = CSRTManagerNative(self.params)
-        
-        # Log parameter loading
-        self._log_parameters()
-        
         self.logger.info("CSRTNativeClient initialized with native C++ CSRT")
     
     def _load_params_from_ros(self) -> 'CSRTParams':
@@ -103,44 +95,12 @@ class CSRTClient:
                 attr_name = param_name.replace('csrt_', '')
                 setattr(params, attr_name, value)
                 
-                self.logger.debug(f"Loaded parameter {param_name}: {value}")
                 
             except Exception as e:
                 self.logger.warn(f"Failed to load parameter {param_name}: {e}, using default: {default_value}")
                 
         return params
     
-    def _log_parameters(self):
-        """Log all CSRT parameters for verification"""
-        self.logger.info("=== Native C++ CSRT Parameters ===")
-        self.logger.info(f"use_hog: {self.params.use_hog}")
-        self.logger.info(f"use_color_names: {self.params.use_color_names}")
-        self.logger.info(f"use_gray: {self.params.use_gray}")
-        self.logger.info(f"use_rgb: {self.params.use_rgb}")
-        self.logger.info(f"use_channel_weights: {self.params.use_channel_weights}")
-        self.logger.info(f"use_segmentation: {self.params.use_segmentation}")
-        self.logger.info(f"window_function: {self.params.window_function}")
-        self.logger.info(f"kaiser_alpha: {self.params.kaiser_alpha}")
-        self.logger.info(f"cheb_attenuation: {self.params.cheb_attenuation}")
-        self.logger.info(f"template_size: {self.params.template_size}")
-        self.logger.info(f"gsl_sigma: {self.params.gsl_sigma}")
-        self.logger.info(f"hog_orientations: {self.params.hog_orientations}")
-        self.logger.info(f"hog_clip: {self.params.hog_clip}")
-        self.logger.info(f"padding: {self.params.padding}")
-        self.logger.info(f"filter_lr: {self.params.filter_lr}")
-        self.logger.info(f"weights_lr: {self.params.weights_lr}")
-        self.logger.info(f"num_hog_channels_used: {self.params.num_hog_channels_used}")
-        self.logger.info(f"admm_iterations: {self.params.admm_iterations}")
-        self.logger.info(f"histogram_bins: {self.params.histogram_bins}")
-        self.logger.info(f"histogram_lr: {self.params.histogram_lr}")
-        self.logger.info(f"background_ratio: {self.params.background_ratio}")
-        self.logger.info(f"number_of_scales: {self.params.number_of_scales}")
-        self.logger.info(f"scale_sigma_factor: {self.params.scale_sigma_factor}")
-        self.logger.info(f"scale_model_max_area: {self.params.scale_model_max_area}")
-        self.logger.info(f"scale_lr: {self.params.scale_lr}")
-        self.logger.info(f"scale_step: {self.params.scale_step}")
-        self.logger.info(f"psr_threshold: {self.params.psr_threshold}")
-        self.logger.info("=== End CSRT Parameters ===")
     
     def update_parameters_from_ros(self):
         """Update parameters from current ROS parameter values"""
@@ -158,7 +118,6 @@ class CSRTClient:
             return []
             
         try:
-            self.logger.debug(f"[CSRTNativeClient] Processing {len(detections)} detections with labels: {labels}")
             
             # Convert detections to proper format
             detection_rects = []
@@ -186,7 +145,6 @@ class CSRTClient:
             results = self.manager.update_trackers(image)
             # Cache labels immediately after update to avoid redundant calls
             self._cached_labels = self.manager.get_tracker_labels() if results else []
-            self.logger.debug(f"[CSRTClient] C++ CSRT updated {len(results)} trackers with labels: {self._cached_labels}")
             return results
             
         except Exception as e:
@@ -214,7 +172,6 @@ class CSRTClient:
         """Get current tracker labels from C++ (direct call)"""
         if self.manager:
             labels = self.manager.get_tracker_labels()
-            self.logger.debug(f"[CSRTClient] Retrieved {len(labels)} labels from C++: {labels}")
             return labels
         return []
     
