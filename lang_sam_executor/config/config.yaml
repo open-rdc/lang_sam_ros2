@@ -9,7 +9,7 @@ lang_sam_tracker_node:
     # 目的: 自然言語で物体を指定してゼロショット検出を実現
     box_threshold: 0.3  # GroundingDINO BoundingBox信頼度閾値
     text_threshold: 0.25  # GroundingDINO テキスト類似度閾値
-    tracking_targets: ["white line", "red pylon", "human", "car"]  # SORT追跡対象
+    tracking_targets: ["white line", "red pylon", "human", "car"]  # 今後実装予定
     
     # ===== 実行周波数設定 =====
     # 目的: GPUメモリ使用量とリアルタイム性のバランス最適化
@@ -27,15 +27,21 @@ lang_sam_tracker_node:
     
     # ===== OpticalFlowトラッカーパラメータ =====
     # 技術的目的: goodFeaturesToTrack + calcOpticalFlowPyrLKによる特徴点ベース追跡
-    optical_flow_max_corners: 100         # 抽出する最大特徴点数
-    optical_flow_quality_level: 0.01      # 特徴点の品質レベル閾値
-    optical_flow_min_distance: 10         # 特徴点間の最小距離（ピクセル）
-    optical_flow_block_size: 7            # 特徴点検出のブロックサイズ
-    optical_flow_win_size_x: 15           # Optical Flow探索ウィンドウX
-    optical_flow_win_size_y: 15           # Optical Flow探索ウィンドウY
-    optical_flow_max_level: 2             # ピラミッドレベル数
-    optical_flow_max_disappeared: 30      # トラック削除までの最大未検出フレーム数
-    optical_flow_min_tracked_points: 5    # トラック維持に必要な最小特徴点数
+    
+    # 特徴点検出パラメータ（増やすと精度向上、処理負荷増加）
+    optical_flow_max_corners: 100         # 抽出する最大特徴点数（50-200推奨）
+    optical_flow_quality_level: 0.01      # 特徴点の品質レベル閾値（0.001-0.1、小さいほど多くの点を検出）
+    optical_flow_min_distance: 10         # 特徴点間の最小距離（5-30ピクセル、密集度制御）
+    optical_flow_block_size: 7            # 特徴点検出のブロックサイズ（3-21の奇数、大きいほど安定）
+    
+    # OpticalFlow追跡パラメータ（大きいほど大きな動きに対応、処理負荷増加）
+    optical_flow_win_size_x: 31           # Optical Flow探索ウィンドウX（5-31の奇数、動き量に応じて調整）
+    optical_flow_win_size_y: 31           # Optical Flow探索ウィンドウY（5-31の奇数、動き量に応じて調整）
+    optical_flow_max_level: 3             # ピラミッドレベル数（0-5、大きな動きには3-4推奨）
+    
+    # トラック管理パラメータ
+    optical_flow_max_disappeared: 60      # トラック削除までの最大未検出フレーム数（10-60）
+    optical_flow_min_tracked_points: 3    # トラック維持に必要な最小特徴点数（3-10、安定性重視）
 
 lane_following_node:
   ros__parameters:

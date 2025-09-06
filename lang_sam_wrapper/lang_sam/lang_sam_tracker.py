@@ -474,7 +474,6 @@ class OpticalFlowTracker:
             vis_image = image.copy()
         
         # OpenCVでOpticalFlow専用要素を追加描画（赤色固定）
-        red_color = (255, 0, 0)  # RGB形式での赤色（draw_imageと統一）
         for track_id, track in self.tracks.items():
             if track["bbox"] is None or track["points"] is None:
                 continue
@@ -486,10 +485,10 @@ class OpticalFlowTracker:
                 for point in points:
                     if point.shape == (1, 2):
                         x, y = point[0]
-                        cv2.circle(vis_image, (int(x), int(y)), 2, red_color, -1)
+                        cv2.circle(vis_image, (int(x), int(y)), 2, (255, 0, 0), -1)
                     elif point.shape == (2,):
                         x, y = point
-                        cv2.circle(vis_image, (int(x), int(y)), 2, red_color, -1)
+                        cv2.circle(vis_image, (int(x), int(y)), 2, (255, 0, 0), -1)
             
             # 前フレームの特徴点がある場合、移動ベクトル描画
             if hasattr(track, 'prev_points') and track.get('prev_points') is not None:
@@ -501,25 +500,11 @@ class OpticalFlowTracker:
                         if prev_pt.shape == (1, 2) and curr_pt.shape == (1, 2):
                             x1, y1 = prev_pt[0].astype(int)
                             x2, y2 = curr_pt[0].astype(int)
-                            cv2.arrowedLine(vis_image, (x1, y1), (x2, y2), red_color, 1, tipLength=0.2)
+                            cv2.arrowedLine(vis_image, (x1, y1), (x2, y2), (255, 0, 0), 1, tipLength=0.2)
+
         
         return vis_image
     
-    def _get_track_color(self, track_id: int) -> Tuple[int, int, int]:
-        """トラックID別の色を生成"""
-        # 目的: トラック識別のための固定色を生成する目的で使用
-        colors = [
-            (0, 255, 0),    # 緑
-            (255, 0, 0),    # 青
-            (0, 0, 255),    # 赤
-            (255, 255, 0),  # シアン
-            (255, 0, 255),  # マゼンタ
-            (0, 255, 255),  # 黄
-            (128, 0, 128),  # 紫
-            (255, 165, 0),  # オレンジ
-        ]
-        return colors[track_id % len(colors)]
-
     def reset(self) -> None:
         """トラッカーリセット"""
         # 目的: 新規トラッキングセッション開始時に状態をクリアする目的で使用

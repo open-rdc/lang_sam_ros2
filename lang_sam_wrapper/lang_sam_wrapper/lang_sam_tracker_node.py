@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-LangSAM Tracker Node - 完全最適化版
-統合処理メソッドを使用したシンプルなROS2ノード実装
+LangSAM Tracker Node - ROS2統合
+OpticalFlowトラッキングとSAM2セグメンテーションのROS2ノード
 """
 
 import rclpy
@@ -182,12 +182,12 @@ class LangSAMTrackerNode(Node):
         self.tracking_targets = self.get_parameter('tracking_targets').value
     
     def image_callback(self, msg: Image):
-        """統合画像処理コールバック - 最適化版"""
+        """統合画像処理コールバック"""
         start_time = time.time()
         try:
-            # フレームスキップ判定（高負荷時の性能向上）
+            # フレームスキップ判定
             self._frame_skip_counter += 1
-            if self._frame_skip_counter % 2 == 0 and self.frame_count > 100:  # 100フレーム後からフレームスキップ
+            if self._frame_skip_counter % 2 == 0 and self.frame_count > 100:
                 return
             
             # ROS2→OpenCV変換（高速化）
@@ -219,7 +219,7 @@ class LangSAMTrackerNode(Node):
             elif self.frame_count % 60 == 1:  # 60フレームごとに出力（2秒に1回）
                 self.logger.info(f"パフォーマンス: GDINO平均={self._gdino_processing_time/max(1, self._gdino_execution_count):.3f}秒")
             
-            # GroundingDINO処理（最適化版）
+            # GroundingDINO処理
             gdino_result = None
             if should_run_gdino:
                 # PIL変換（必要時のみ）
@@ -245,11 +245,11 @@ class LangSAMTrackerNode(Node):
                     if self.frame_count <= 10 or self._gdino_execution_count % 10 == 1:
                         self.logger.info(f"GDINO完了: {processing_time:.3f}秒, {len(gdino_result.get('boxes', []))}個検出")
             
-            # 統合フレーム処理（最適化版）
+            # 統合フレーム処理
             reset_tracker = should_run_gdino
             result = self.lang_sam_tracker.process_frame(image_rgb, gdino_result, reset_tracker)
             
-            # 結果配信（最適化版）
+            # 結果配信
             self._publish_results_optimized(gdino_result, result, image_rgb, image_pil, msg.header, bool(gdino_result), should_run_sam2)
             
             if should_run_sam2:
@@ -293,7 +293,7 @@ class LangSAMTrackerNode(Node):
             self.logger.error(f"結果配信エラー: {e}")
     
     def _publish_gdino_result(self, gdino_result: dict, image_rgb: np.ndarray, header):
-        """GroundingDINO結果配信（最適化版）"""
+        """GroundingDINO結果配信"""
         # テンソル変換の最適化
         boxes_tensor = gdino_result.get("boxes", [])
         scores_tensor = gdino_result.get("scores", [])
@@ -319,7 +319,7 @@ class LangSAMTrackerNode(Node):
         self.gdino_pub.publish(gdino_msg)
     
     def _publish_tracking_result(self, tracking_result: dict, image_rgb: np.ndarray, header):
-        """OpticalFlowトラッキング結果配信（最適化版）"""
+        """OpticalFlowトラッキング結果配信"""
         tracking_vis_result = {
             "boxes": tracking_result.get("boxes", []),
             "labels": tracking_result.get("labels", []),
@@ -335,7 +335,7 @@ class LangSAMTrackerNode(Node):
         self.optical_flow_pub.publish(optical_flow_msg)
     
     def _publish_sam2_result(self, tracking_result: dict, image_rgb: np.ndarray, image_pil, header):
-        """SAM2結果配信（最適化版）"""
+        """SAM2結果配信"""
         try:
             sam_masks = []
             image_np = np.array(image_pil)
@@ -385,7 +385,6 @@ class LangSAMTrackerNode(Node):
                     "track_ids": []  # トラッキングIDなし
                 }
                 gdino_vis = self.lang_sam_tracker.visualize(image_rgb, gdino_only_result)
-                print(f"[DEBUG] GDINO可視化: {len(gdino_only_result['boxes'])}個のボックス（純粋な検出結果）")
                 gdino_msg = self.cv_bridge.cv2_to_imgmsg(gdino_vis, encoding='rgb8')
                 gdino_msg.header = header
                 self.gdino_pub.publish(gdino_msg)
@@ -432,7 +431,6 @@ class LangSAMTrackerNode(Node):
                 }
                 
                 sam_vis = self.lang_sam_tracker.visualize(image_rgb, sam_only_result)
-                print(f"[DEBUG] SAM2可視化: {len(sam_only_result['boxes'])}個のボックス, {len([m for m in sam_masks if m is not None])}個のマスク生成")
                 sam_msg = self.cv_bridge.cv2_to_imgmsg(sam_vis, encoding='rgb8')
                 sam_msg.header = header
                 self.sam_pub.publish(sam_msg)
