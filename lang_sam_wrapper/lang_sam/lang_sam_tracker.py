@@ -474,7 +474,7 @@ class OpticalFlowTracker:
             vis_image = image.copy()
         
         # OpenCVでOpticalFlow専用要素を追加描画（赤色固定）
-        red_color = (0, 0, 255)  # BGR形式での赤色
+        red_color = (255, 0, 0)  # RGB形式での赤色（draw_imageと統一）
         for track_id, track in self.tracks.items():
             if track["bbox"] is None or track["points"] is None:
                 continue
@@ -501,7 +501,6 @@ class OpticalFlowTracker:
                         if prev_pt.shape == (1, 2) and curr_pt.shape == (1, 2):
                             x1, y1 = prev_pt[0].astype(int)
                             x2, y2 = curr_pt[0].astype(int)
-                            # 移動ベクトルを細い赤い矢印で描画
                             cv2.arrowedLine(vis_image, (x1, y1), (x2, y2), red_color, 1, tipLength=0.2)
         
         return vis_image
