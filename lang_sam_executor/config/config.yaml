@@ -9,63 +9,37 @@ lang_sam_tracker_node:
     # 目的: 自然言語で物体を指定してゼロショット検出を実現
     box_threshold: 0.3  # GroundingDINO BoundingBox信頼度閾値
     text_threshold: 0.25  # GroundingDINO テキスト類似度閾値
-    tracking_targets: ["white line", "red pylon", "human", "car"]  # CSRT追跡対象
+    tracking_targets: ["white line", "red pylon", "human", "car"]  # SORT追跡対象
     
     # ===== 実行周波数設定 =====
     # 目的: GPUメモリ使用量とリアルタイム性のバランス最適化
-    gdino_interval_seconds: 1.0  # GroundingDINO実行間隔（2.0秒 = 0.5Hz）
+    gdino_interval_seconds: 2.0  # GroundingDINO実行間隔（2.0秒 = 0.5Hz）
     sam2_interval_seconds: 0.1   # SAM2セグメンテーション実行間隔（0.1秒 = 10Hz）
-    sam2_independent_mode: true  # SAM2独立実行モード（CSRTトラッキング結果を使用）
+    sam2_independent_mode: true  # SAM2独立実行モード（SORTトラッキング結果を使用）
     
     # ===== ROS2トピック設定 =====
     # 目的: モジュラーシステム構築で各コンポーネントを分離
     # input_topic: "/image_raw"  # 入力画像（simulator）
     input_topic: "/zed/zed_node/rgb/image_rect_color"  # 入力画像（ZEDカメラ）
     gdino_topic: "/image_gdino"    # GroundingDINO検出結果配信
-    csrt_output_topic: "/image_csrt"      # CSRT追跡結果配信
+    optical_flow_output_topic: "/image_optical_flow"      # OpticalFlow追跡結果配信
     sam_topic: "/image_sam"        # SAM2セグメンテーション結果配信
     
-    # ===== トラッキング設定 =====
-    # 目的: バウンディングボックスの安定性と精度のバランス調整
-    bbox_margin: 5                 # BoundingBox境界マージン（ピクセル）
-    bbox_min_size: 3               # 最小BoundingBoxサイズ（ピクセル）- 小さなBBOXも許可
-    tracker_min_size: 3            # トラッカー継続最小サイズ（ピクセル）- 小さなBBOXも継続
-    
-    
-    # ===== CSRTトラッカー内部パラメータ =====
-    # 技術的目的: 判別的相関フィルタ(DCF)アルゴリズムの27個パラメータで高精度追跡を実現
-    # デフォルト値は速度重視設定。精度向上時はHOG/グレースケール/セグメンテーション有効化
-    csrt_use_hog: true                    # HOG特徴量（デフォルト：true、false時は速度向上）
-    csrt_use_color_names: true           # 色名特徴量（デフォルト：false、true時は精度向上・計算量増）
-    csrt_use_gray: false                   # グレースケール（デフォルト：true、false時は色情報重視）
-    csrt_use_rgb: true                   # RGB特徴量（デフォルト：false、true時は色精度向上・計算量増）
-    csrt_use_channel_weights: true       # チャンネル重み（デフォルト：false、true時は適応的重み付け）
-    csrt_use_segmentation: true           # セグメンテーション（デフォルト：true、false時は軽量化）
-    csrt_window_function: "hann"          # 窓関数（デフォルト：hann、cosine/uniform選択可）
-    csrt_kaiser_alpha: 3.75               # Kaiser窓α（デフォルト：3.75、大=シャープ、小=スムーズ）
-    csrt_cheb_attenuation: 55.0           # Chebyshev減衰（デフォルト：45.0、大=ノイズ抑制強化）
-    csrt_template_size: 250.0             # テンプレートサイズ（デフォルト：200、大=精度向上・計算量増）
-    csrt_gsl_sigma: 1.4                   # ガウシアンσ（デフォルト：1.0、大=広範囲探索）
-    csrt_hog_orientations: 11              # HOG方向数（デフォルト：9、大=精度向上・計算量増）
-    csrt_hog_clip: 0.3                    # HOGクリップ（デフォルト：0.2、小=特徴量保持強化）
-    csrt_padding: 5.0                     # パディング倍率（デフォルト：3.0、大=探索範囲拡大）
-    csrt_filter_lr: 0.03                  # フィルター学習率（デフォルト：0.02、大=高速適応・不安定化）
-    csrt_weights_lr: 0.03                 # 重み学習率（デフォルト：0.02、大=高速適応・不安定化）
-    csrt_num_hog_channels_used: -1        # HOGチャンネル数（デフォルト：-1全て、正数=制限・軽量化）
-    csrt_admm_iterations: 4               # ADMM反復数（デフォルト：4、大=精度向上・計算量増）
-    csrt_histogram_bins: 16               # ヒストグラム量子化（デフォルト：16、大=精度向上・計算量増）
-    csrt_histogram_lr: 0.05               # ヒストグラム学習率（デフォルト：0.04、大=高速適応）
-    csrt_background_ratio: 2              # 背景領域比率（デフォルト：2、大=背景情報増加）
-    csrt_number_of_scales: 100             # スケール探索数（デフォルト：33、大=スケール頑健性向上）
-    csrt_scale_sigma_factor: 0.50         # スケールσ係数（デフォルト：0.25、大=スケール範囲拡大）
-    csrt_scale_model_max_area: 2048.0      # スケール最大面積（デフォルト：512、大=大物体対応）
-    csrt_scale_lr: 0.045                  # スケール学習率（デフォルト：0.025、大=スケール高速適応）
-    csrt_scale_step: 1.12                 # スケールステップ（デフォルト：1.02、大=粗いスケール探索）
-    csrt_psr_threshold: 0.025             # PSR閾値（デフォルト：0.035、小=追跡継続しやすく）
+    # ===== OpticalFlowトラッカーパラメータ =====
+    # 技術的目的: goodFeaturesToTrack + calcOpticalFlowPyrLKによる特徴点ベース追跡
+    optical_flow_max_corners: 100         # 抽出する最大特徴点数
+    optical_flow_quality_level: 0.01      # 特徴点の品質レベル閾値
+    optical_flow_min_distance: 10         # 特徴点間の最小距離（ピクセル）
+    optical_flow_block_size: 7            # 特徴点検出のブロックサイズ
+    optical_flow_win_size_x: 15           # Optical Flow探索ウィンドウX
+    optical_flow_win_size_y: 15           # Optical Flow探索ウィンドウY
+    optical_flow_max_level: 2             # ピラミッドレベル数
+    optical_flow_max_disappeared: 30      # トラック削除までの最大未検出フレーム数
+    optical_flow_min_tracked_points: 5    # トラック維持に必要な最小特徴点数
 
 lane_following_node:
   ros__parameters:
-    # ===== 制御パラメータ（YOLOP Nav互換）=====
+    # ===== 制御パラメータ =====
     linear_velocity: 1.0           # 前進速度（m/s）
     kp: 1.0                        # P制御ゲイン（比例制御のみ使用）
     max_angular_velocity: 1.0      # 最大角速度（rad/s）
@@ -83,7 +57,7 @@ multi_view_node:
   ros__parameters:
     # ===== 4分割画像配置設定 =====
     upper_left_topic: "/image_gdino"  # 左上の画像トピック
-    upper_right_topic: "/image_csrt"    # 右上の画像トピック
+    upper_right_topic: "/image_optical_flow"    # 右上の画像トピック
     lower_left_topic: "/image_sam"      # 左下の画像トピック
     lower_right_topic: "/lane_following_visualization"      # 右下の画像トピック
     

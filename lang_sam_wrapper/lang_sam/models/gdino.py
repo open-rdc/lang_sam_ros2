@@ -62,31 +62,71 @@ class GDINO:
         3. 推論実行（勾配計算無効化で高速化）
         4. 後処理で座標変換と閾値フィルタリング
         """
+        print(f"[GDINO Debug] 入力確認:")
+        print(f"  - images_pil数: {len(images_pil)}")
+        print(f"  - texts_prompt: {texts_prompt}")
+        print(f"  - box_threshold: {box_threshold}")
+        print(f"  - text_threshold: {text_threshold}")
+        
         # プロンプトの形式統一：末尾ピリオドを確保
         # GroundingDINOの学習時データ形式に合わせることで検出精度を向上させる目的で使用
         for i, prompt in enumerate(texts_prompt):
             if prompt[-1] != ".":
                 texts_prompt[i] += "."
+        print(f"  - 処理後texts_prompt: {texts_prompt}")
+        
         # 前処理：画像の正規化とテキストのトークン化を同時実行する目的で使用
         # return_tensors="pt"でPyTorchテンソル形式に変換
         inputs = self.processor(images=images_pil, text=texts_prompt, return_tensors="pt").to(self.model.device)
+        print(f"  - input_ids shape: {inputs.input_ids.shape}")
+        print(f"  - pixel_values shape: {inputs.pixel_values.shape}")
         
         # 推論実行：勾配計算を無効化してメモリ消費とを削減する目的で使用
         with torch.no_grad():
             outputs = self.model(**inputs)  # Transformerフォワードパス実行
 
+        print(f"  - model outputs keys: {outputs.keys()}")
+        
         # 後処理：モデル出力を実用的な検出結果に変換
         # - NMSによる重複除去
         # - 閾値によるフィルタリング
         # - 画像座標系への変換
         # target_sizesで元画像サイズに合わせた座標変換を行う目的で使用
-        results = self.processor.post_process_grounded_object_detection(
-            outputs,
-            inputs.input_ids,
-            box_threshold=box_threshold,    # IoU閾値でバウンディングボックスをフィルタ
-            text_threshold=text_threshold,  # コサイン類似度でテキスト一致度をフィルタ
-            target_sizes=[k.size[::-1] for k in images_pil],  # (width, height) → (height, width)
-        )
+        target_sizes = [k.size[::-1] for k in images_pil]  # (width, height) → (height, width)
+        print(f"  - target_sizes: {target_sizes}")
+        
+        try:
+            results = self.processor.post_process_grounded_object_detection(
+                outputs,
+                inputs.input_ids,
+                box_threshold=box_threshold,    # IoU閾値でバウンディングボックスをフィルタ
+                text_threshold=text_threshold,  # コサイン類似度でテキスト一致度をフィルタ
+                target_sizes=target_sizes,
+            )
+            print(f"  - post_process成功")
+        except Exception as e:
+            print(f"  - post_process失敗: {e}")
+            print(f"  - outputs type: {type(outputs)}")
+            if hasattr(outputs, 'last_hidden_state'):
+                print(f"  - last_hidden_state shape: {outputs.last_hidden_state.shape}")
+            if hasattr(outputs, 'logits'):
+                print(f"  - logits shape: {outputs.logits.shape}")
+            if hasattr(outputs, 'pred_boxes'):
+                print(f"  - pred_boxes shape: {outputs.pred_boxes.shape}")
+            raise e
+        
+        print(f"[GDINO Debug] 生出力確認:")
+        print(f"  - results数: {len(results)}")
+        for i, result in enumerate(results):
+            print(f"  - result[{i}] keys: {result.keys()}")
+            print(f"  - result[{i}] types: {[(k, type(v)) for k, v in result.items()]}")
+            if 'boxes' in result:
+                print(f"  - result[{i}] boxes shape/len: {result['boxes'].shape if hasattr(result['boxes'], 'shape') else len(result['boxes'])}")
+            if 'scores' in result:
+                print(f"  - result[{i}] scores shape/len: {result['scores'].shape if hasattr(result['scores'], 'shape') else len(result['scores'])}")
+            if 'labels' in result:
+                print(f"  - result[{i}] labels: {result['labels']}")
+        
         return results
 
 
