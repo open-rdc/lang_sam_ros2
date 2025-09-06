@@ -8,7 +8,7 @@ import numpy as np
 import cv2
 from PIL import Image
 from typing import Dict, List, Optional, Any, Tuple, Union
-import time
+from functools import lru_cache
 
 # LangSAMコンポーネントインポート
 from .models import GroundingDINO, SAM2
@@ -64,6 +64,10 @@ class OpticalFlowTracker:
         # 前フレーム保存用（グレースケール）
         self.prev_gray: Optional[np.ndarray] = None
         
+        # 最適化: 配列事前割り当て
+        self._temp_tracks = np.empty((0, 5), dtype=np.float32)
+        self._temp_labels = {}
+        
         print(f"[OpticalFlowTracker] 初期化完了: max_corners={max_corners}, min_tracked_points={min_tracked_points}")
     
     def update(self, 
@@ -80,9 +84,12 @@ class OpticalFlowTracker:
             tracks: トラック結果 [[x1, y1, x2, y2, track_id], ...]
             track_labels: {track_id: label}のマッピング
         """
-        # グレースケール変換
+        # 高速グレースケール変換
         # 目的: Optical Flow計算のためグレースケール化する目的で使用
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if frame.ndim == 3:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = frame  # 既にグレースケールの場合
         
         # 初回フレームまたは前フレームがない場合
         if self.prev_gray is None:
@@ -133,7 +140,10 @@ class OpticalFlowTracker:
             # 目的: goodFeaturesToTrackでコーナー特徴点を検出する目的で使用
             corners = cv2.goodFeaturesToTrack(roi, **self.feature_params)
             
+            print(f"[OpticalFlowTracker] ROI({x1},{y1},{x2},{y2}) 特徴点検出: {len(corners) if corners is not None else 0}個")
+            
             if corners is not None and len(corners) >= self.min_tracked_points:
+                print(f"[OpticalFlowTracker] 変換前corners.shape: {corners.shape}")
                 # ROI座標を画像座標に変換
                 corners[:, 0, 0] += x1
                 corners[:, 0, 1] += y1
@@ -147,65 +157,127 @@ class OpticalFlowTracker:
                     "disappeared": 0
                 }
                 self.next_id += 1
-                print(f"[OpticalFlowTracker] 新規トラック{track_id}を登録: {len(corners)}個の特徴点")
+                print(f"[OpticalFlowTracker] 新規トラック{track_id}を登録: {len(corners)}個の特徴点, corners.shape={corners.shape}")
     
     def _track_existing_objects(self, gray: np.ndarray):
-        """既存トラックの特徴点を追跡"""
+        """既存トラックの特徴点を追跡（最適化版）"""
         # 目的: calcOpticalFlowPyrLKで前フレームから現フレームへの特徴点移動を計算する目的で使用
         
-        for track_id, track in list(self.tracks.items()):
-            old_points = track["points"]
-            
-            if old_points is None or len(old_points) == 0:
+        # バッチ処理用の配列準備
+        track_ids_to_process = []
+        all_old_points = []
+        
+        # 有効な特徴点を持つトラックを収集
+        for track_id, track in self.tracks.items():
+            if track["points"] is not None and len(track["points"]) > 0:
+                track_ids_to_process.append(track_id)
+                all_old_points.extend(track["points"])
+        
+        print(f"[OpticalFlowTracker] 追跡対象: {len(track_ids_to_process)}個のトラック, {len(all_old_points)}個の特徴点")
+        
+        if not all_old_points:
+            print("[OpticalFlowTracker] 追跡可能な特徴点がありません")
+            # すべてのトラックのdisappearedをインクリメント
+            for track in self.tracks.values():
                 track["disappeared"] += 1
-                continue
+            return
+        
+        # バッチでOptical Flow計算（高速化）
+        all_old_points_array = np.array(all_old_points, dtype=np.float32)
+        print(f"[OpticalFlowTracker] Optical Flow計算開始: {all_old_points_array.shape}の特徴点")
+        
+        new_points, status, error = cv2.calcOpticalFlowPyrLK(
+            self.prev_gray, gray, all_old_points_array, None, **self.lk_params
+        )
+        
+        if status is not None:
+            successful_points = np.sum(status == 1)
+            print(f"[OpticalFlowTracker] Optical Flow完了: {successful_points}/{len(status)}個の特徴点追跡成功")
+        
+        # 結果を各トラックに分配
+        point_idx = 0
+        for track_id in track_ids_to_process:
+            track = self.tracks[track_id]
+            track_points_count = len(track["points"])
             
-            # Optical Flowで特徴点を追跡
-            # 目的: Lucas-Kanade法で特徴点の新しい位置を計算する目的で使用
-            new_points, status, error = cv2.calcOpticalFlowPyrLK(
-                self.prev_gray, gray, old_points, None, **self.lk_params
-            )
+            track_new_points = new_points[point_idx:point_idx + track_points_count]
+            track_status = status[point_idx:point_idx + track_points_count]
+            track_old_points = track["points"]
+            
+            point_idx += track_points_count
             
             # 追跡成功した特徴点のみを保持
-            if status is not None:
-                good_new = new_points[status == 1]
-                good_old = old_points[status == 1]
-                
-                if len(good_new) >= self.min_tracked_points:
-                    # 特徴点群の移動ベクトルを計算
-                    # 目的: 全体の動きを推定してBBOXを更新する目的で使用
-                    movement = np.median(good_new - good_old, axis=0)
+            good_new = track_new_points[track_status.flatten() == 1]
+            good_old = track_old_points[track_status.flatten() == 1]
+            
+            # 特徴点の形状と数をチェック
+            if len(good_new) >= self.min_tracked_points and len(good_old) >= self.min_tracked_points and good_new.shape == good_old.shape:
+                try:
+                    # 特徴点群の移動ベクトルを計算（中央値使用で外れ値除去）
+                    # 目的: 2次元座標として整形して堅牢な移動ベクトル計算を実現する目的で使用
+                    if good_new.ndim == 3:
+                        good_new_2d = good_new.reshape(-1, 2)
+                        good_old_2d = good_old.reshape(-1, 2)
+                    else:
+                        good_new_2d = good_new
+                        good_old_2d = good_old
+                    
+                    # 中央値を使用して外れ値に対する堅牢性を向上
+                    differences = good_new_2d - good_old_2d
+                    movement = np.median(differences, axis=0)
+                    
+                    # 移動ベクトル抽出（次元チェック付き）
+                    if movement.ndim == 1 and len(movement) >= 2:
+                        dx, dy = float(movement[0]), float(movement[1])
+                    elif movement.ndim == 2 and movement.shape[0] >= 2:
+                        dx, dy = float(movement[0]), float(movement[1])
+                    else:
+                        # フォールバック: 移動なしとして処理
+                        dx, dy = 0.0, 0.0
+                    
+                    # 異常値のチェック（大きすぎる移動を制限）
+                    max_movement = 100.0  # 最大移動ピクセル数
+                    if abs(dx) > max_movement or abs(dy) > max_movement:
+                        dx, dy = 0.0, 0.0
                     
                     # BBOXを更新
                     old_bbox = track["bbox"]
                     new_bbox = [
-                        old_bbox[0] + movement[0],
-                        old_bbox[1] + movement[1],
-                        old_bbox[2] + movement[0],
-                        old_bbox[3] + movement[1]
+                        old_bbox[0] + dx,
+                        old_bbox[1] + dy,
+                        old_bbox[2] + dx,
+                        old_bbox[3] + dy
                     ]
                     
-                    # 画像境界内にクリップ
+                    # 画像境界内にクリップ（高速化）
                     h, w = gray.shape
-                    new_bbox[0] = max(0, min(new_bbox[0], w-1))
-                    new_bbox[1] = max(0, min(new_bbox[1], h-1))
-                    new_bbox[2] = max(new_bbox[0]+1, min(new_bbox[2], w))
-                    new_bbox[3] = max(new_bbox[1]+1, min(new_bbox[3], h))
+                    new_bbox[0] = np.clip(new_bbox[0], 0, w-1)
+                    new_bbox[1] = np.clip(new_bbox[1], 0, h-1)
+                    new_bbox[2] = np.clip(new_bbox[2], new_bbox[0]+1, w)
+                    new_bbox[3] = np.clip(new_bbox[3], new_bbox[1]+1, h)
                     
                     # トラック情報を更新
+                    track["prev_points"] = track["points"]  # 前フレームの特徴点を保存
                     track["points"] = good_new.reshape(-1, 1, 2)
                     track["bbox"] = new_bbox
                     track["disappeared"] = 0
                     
-                    print(f"[OpticalFlowTracker] トラック{track_id}更新: {len(good_new)}個の特徴点を追跡")
-                else:
-                    # 追跡できた特徴点が少なすぎる
+                    print(f"[OpticalFlowTracker] トラック{track_id}更新: 移動(dx={dx:.1f}, dy={dy:.1f}), {len(good_new)}個の特徴点")
+                    
+                except Exception as e:
+                    # エラー時は追跡失敗として扱う
+                    print(f"[OpticalFlowTracker] トラック{track_id}移動計算エラー: {e}")
                     track["disappeared"] += 1
                     track["points"] = None
-                    print(f"[OpticalFlowTracker] トラック{track_id}: 特徴点不足 ({len(good_new)}個)")
             else:
+                # 追跡できた特徴点が少なすぎる
                 track["disappeared"] += 1
                 track["points"] = None
+        
+        # 残りのトラック（特徴点がないもの）のdisappearedをインクリメント
+        for track_id, track in self.tracks.items():
+            if track_id not in track_ids_to_process:
+                track["disappeared"] += 1
     
     def _process_new_detections(self, 
                                gray: np.ndarray,
@@ -221,104 +293,234 @@ class OpticalFlowTracker:
         else:
             return
         
-        # 各検出に対して処理
-        for i, det in enumerate(dets):
-            bbox = det[:4].astype(int)
-            x1, y1, x2, y2 = bbox
+        # 既存トラックのbbox一覧を事前に取得（高速化）
+        active_tracks = {tid: track["bbox"] for tid, track in self.tracks.items() 
+                        if track["bbox"] is not None}
+        
+        # バッチでIoU計算（ベクトル化）
+        if active_tracks:
+            track_ids = list(active_tracks.keys())
+            track_bboxes = np.array([active_tracks[tid] for tid in track_ids], dtype=np.float32)
             
-            # 既存トラックとのIoUを計算して照合
-            best_iou = 0
-            best_track_id = None
+            for i, det in enumerate(dets):
+                bbox = det[:4].astype(np.float32)
+                
+                # ベクトル化されたIoU計算
+                ious = self._calculate_iou_vectorized(bbox, track_bboxes)
+                
+                # 最良のマッチを検索
+                best_idx = np.argmax(ious)
+                best_iou = ious[best_idx]
+                
+                if best_iou > 0.3:  # IoU閾値
+                    best_track_id = track_ids[best_idx]
+            
+                    # 既存トラックを更新
+                    self._update_track_features(gray, bbox.astype(int), best_track_id, 
+                                               labels[i] if labels and i < len(labels) else "unknown")
+                else:
+                    # 新規トラック登録
+                    self._create_new_track(gray, bbox.astype(int), 
+                                         labels[i] if labels and i < len(labels) else "unknown")
+        else:
+            # 既存トラックがない場合、すべて新規登録
+            for i, det in enumerate(dets):
+                bbox = det[:4].astype(int)
+                self._create_new_track(gray, bbox, 
+                                     labels[i] if labels and i < len(labels) else "unknown")
+    
+    def _update_track_features(self, gray: np.ndarray, bbox: np.ndarray, track_id: int, label: str):
+        """トラックの特徴点を更新"""
+        x1, y1, x2, y2 = bbox
+        if y2 <= y1 or x2 <= x1:  # 無効なbbox
+            return
+            
+        roi = gray[y1:y2, x1:x2]
+        corners = cv2.goodFeaturesToTrack(roi, **self.feature_params)
+        
+        if corners is not None and len(corners) >= self.min_tracked_points:
+            corners[:, 0, 0] += x1
+            corners[:, 0, 1] += y1
+            self.tracks[track_id]["points"] = corners
+            self.tracks[track_id]["bbox"] = bbox.tolist()
+            self.tracks[track_id]["disappeared"] = 0
+    
+    def _create_new_track(self, gray: np.ndarray, bbox: np.ndarray, label: str):
+        """新規トラックを作成"""
+        x1, y1, x2, y2 = bbox
+        if y2 <= y1 or x2 <= x1:  # 無効なbbox
+            return
+            
+        roi = gray[y1:y2, x1:x2]
+        corners = cv2.goodFeaturesToTrack(roi, **self.feature_params)
+        
+        if corners is not None and len(corners) >= self.min_tracked_points:
+            corners[:, 0, 0] += x1
+            corners[:, 0, 1] += y1
+            
+            track_id = self.next_id
+            self.tracks[track_id] = {
+                "points": corners,
+                "bbox": bbox.tolist(),
+                "label": label,
+                "disappeared": 0
+            }
+            self.next_id += 1
+    
+    def _calculate_iou_vectorized(self, bbox1: np.ndarray, bbox2_array: np.ndarray) -> np.ndarray:
+        """IoU（Intersection over Union）をベクトル化して高速計算"""
+        # 目的: 複数のBBOXと1つのBBOXのIoUを一括計算する目的で使用
+        if len(bbox2_array) == 0:
+            return np.array([])
+            
+        x1_min, y1_min, x1_max, y1_max = bbox1
+        x2_min, y2_min, x2_max, y2_max = bbox2_array[:, 0], bbox2_array[:, 1], bbox2_array[:, 2], bbox2_array[:, 3]
+        
+        # ベクトル化された交差領域計算
+        x_inter_min = np.maximum(x1_min, x2_min)
+        y_inter_min = np.maximum(y1_min, y2_min)
+        x_inter_max = np.minimum(x1_max, x2_max)
+        y_inter_max = np.minimum(y1_max, y2_max)
+        
+        # 交差領域の幅と高さ
+        inter_width = np.maximum(0, x_inter_max - x_inter_min)
+        inter_height = np.maximum(0, y_inter_max - y_inter_min)
+        inter_area = inter_width * inter_height
+        
+        # 各BBOXの面積
+        bbox1_area = (x1_max - x1_min) * (y1_max - y1_min)
+        bbox2_areas = (x2_max - x2_min) * (y2_max - y2_min)
+        
+        # Union面積
+        union_areas = bbox1_area + bbox2_areas - inter_area
+        
+        # IoU計算（0除算防止）
+        return np.divide(inter_area, union_areas, out=np.zeros_like(inter_area), where=union_areas!=0)
+    
+    def _cleanup_tracks(self):
+        """disappeared countが閾値を超えたトラックを削除（最適化版）"""
+        # 目的: 長時間検出されないトラックを削除する目的で使用
+        tracks_to_remove = [track_id for track_id, track in self.tracks.items() 
+                           if track["disappeared"] > self.max_disappeared]
+        
+        for track_id in tracks_to_remove:
+            del self.tracks[track_id]
+    
+    def _get_current_tracks(self) -> Tuple[np.ndarray, Dict[str, str]]:
+        """現在のトラック情報を取得（最適化版）"""
+        # 目的: 有効なトラック情報を整形して返す目的で使用
+        if not self.tracks:
+            return self._temp_tracks[:0], {}
+        
+        # 有効なトラックをフィルタリング
+        active_tracks = [(track_id, track) for track_id, track in self.tracks.items() 
+                        if track["bbox"] is not None and track["disappeared"] == 0]
+        
+        if not active_tracks:
+            return self._temp_tracks[:0], {}
+        
+        # 効率的な配列構築
+        num_tracks = len(active_tracks)
+        if len(self._temp_tracks) < num_tracks:
+            self._temp_tracks = np.empty((num_tracks * 2, 5), dtype=np.float32)  # バッファサイズを倍に
+        
+        tracks_array = self._temp_tracks[:num_tracks]
+        self._temp_labels.clear()
+        
+        for i, (track_id, track) in enumerate(active_tracks):
+            bbox = track["bbox"]
+            tracks_array[i] = [bbox[0], bbox[1], bbox[2], bbox[3], float(track_id)]
+            self._temp_labels[track_id] = track["label"]
+        
+        return tracks_array, self._temp_labels.copy()
+    
+    def visualize_optical_flow(self, image: np.ndarray, use_draw_image: bool = False) -> np.ndarray:
+        """OpticalFlow可視化（ハイブリッド版：draw_image + OpenCV）"""
+        # 目的: draw_imageでBBOX・ラベルを描画し、OpenCVで特徴点・移動ベクトルを追加描画する目的で使用
+        
+        if use_draw_image:
+            # まずdraw_imageで基本要素（BBOX、ラベル、マスク）を描画
+            from .utils import draw_image
+            
+            # トラッキング結果をdraw_image形式に変換
+            boxes = []
+            labels = []
+            scores = []
+            track_ids = []
             
             for track_id, track in self.tracks.items():
                 if track["bbox"] is not None:
-                    iou = self._calculate_iou(bbox, track["bbox"])
-                    if iou > best_iou and iou > 0.3:  # IoU閾値
-                        best_iou = iou
-                        best_track_id = track_id
+                    boxes.append(track["bbox"])
+                    labels.append(track["label"])
+                    scores.append(1.0)  # 固定スコア
+                    track_ids.append(track_id)
             
-            if best_track_id is not None:
-                # 既存トラックを更新（特徴点を再抽出）
-                # 目的: 検出でトラックが確認されたので特徴点を再初期化する目的で使用
-                roi = gray[y1:y2, x1:x2]
-                corners = cv2.goodFeaturesToTrack(roi, **self.feature_params)
+            if boxes:
+                xyxy = np.array(boxes, dtype=np.float32)
+                probs = np.array(scores, dtype=np.float32)
                 
-                if corners is not None and len(corners) >= self.min_tracked_points:
-                    corners[:, 0, 0] += x1
-                    corners[:, 0, 1] += y1
-                    self.tracks[best_track_id]["points"] = corners
-                    self.tracks[best_track_id]["bbox"] = bbox.tolist()
-                    self.tracks[best_track_id]["disappeared"] = 0
-                    print(f"[OpticalFlowTracker] トラック{best_track_id}を再初期化: {len(corners)}個の特徴点")
+                # draw_imageで基本描画（ID表示なし）
+                vis_image = draw_image(
+                    image_rgb=image,
+                    masks=None,
+                    xyxy=xyxy,
+                    probs=probs,
+                    labels=labels,
+                    track_ids=[]  # ID表示を削除
+                )
             else:
-                # 新規トラックとして登録
-                roi = gray[y1:y2, x1:x2]
-                corners = cv2.goodFeaturesToTrack(roi, **self.feature_params)
-                
-                if corners is not None and len(corners) >= self.min_tracked_points:
-                    corners[:, 0, 0] += x1
-                    corners[:, 0, 1] += y1
-                    
-                    track_id = self.next_id
-                    self.tracks[track_id] = {
-                        "points": corners,
-                        "bbox": bbox.tolist(),
-                        "label": labels[i] if labels and i < len(labels) else "unknown",
-                        "disappeared": 0
-                    }
-                    self.next_id += 1
-                    print(f"[OpticalFlowTracker] 新規トラック{track_id}を登録: {len(corners)}個の特徴点")
-    
-    def _calculate_iou(self, bbox1: List[float], bbox2: List[float]) -> float:
-        """IoU（Intersection over Union）を計算"""
-        # 目的: 2つのBBOXの重なり度合いを計算する目的で使用
-        x1_min, y1_min, x1_max, y1_max = bbox1
-        x2_min, y2_min, x2_max, y2_max = bbox2
+                vis_image = image.copy()
+        else:
+            vis_image = image.copy()
         
-        # 交差領域の計算
-        x_inter_min = max(x1_min, x2_min)
-        y_inter_min = max(y1_min, y2_min)
-        x_inter_max = min(x1_max, x2_max)
-        y_inter_max = min(y1_max, y2_max)
-        
-        if x_inter_max < x_inter_min or y_inter_max < y_inter_min:
-            return 0.0
-        
-        inter_area = (x_inter_max - x_inter_min) * (y_inter_max - y_inter_min)
-        bbox1_area = (x1_max - x1_min) * (y1_max - y1_min)
-        bbox2_area = (x2_max - x2_min) * (y2_max - y2_min)
-        union_area = bbox1_area + bbox2_area - inter_area
-        
-        return inter_area / union_area if union_area > 0 else 0.0
-    
-    def _cleanup_tracks(self):
-        """disappeared countが閾値を超えたトラックを削除"""
-        # 目的: 長時間検出されないトラックを削除する目的で使用
-        for track_id in list(self.tracks.keys()):
-            if self.tracks[track_id]["disappeared"] > self.max_disappeared:
-                del self.tracks[track_id]
-                print(f"[OpticalFlowTracker] トラック{track_id}を削除")
-    
-    def _get_current_tracks(self) -> Tuple[np.ndarray, Dict[str, str]]:
-        """現在のトラック情報を取得"""
-        # 目的: 有効なトラック情報を整形して返す目的で使用
-        if len(self.tracks) == 0:
-            return np.empty((0, 5), dtype=np.float32), {}
-        
-        tracks_list = []
-        track_labels = {}
-        
+        # OpenCVでOpticalFlow専用要素を追加描画（赤色固定）
+        red_color = (0, 0, 255)  # BGR形式での赤色
         for track_id, track in self.tracks.items():
-            if track["bbox"] is not None and track["disappeared"] == 0:
-                bbox = track["bbox"]
-                tracks_list.append([bbox[0], bbox[1], bbox[2], bbox[3], float(track_id)])
-                track_labels[track_id] = track["label"]
+            if track["bbox"] is None or track["points"] is None:
+                continue
+                
+            points = track["points"]
+            
+            # 特徴点描画（小さな赤い円）
+            if len(points) > 0:
+                for point in points:
+                    if point.shape == (1, 2):
+                        x, y = point[0]
+                        cv2.circle(vis_image, (int(x), int(y)), 2, red_color, -1)
+                    elif point.shape == (2,):
+                        x, y = point
+                        cv2.circle(vis_image, (int(x), int(y)), 2, red_color, -1)
+            
+            # 前フレームの特徴点がある場合、移動ベクトル描画
+            if hasattr(track, 'prev_points') and track.get('prev_points') is not None:
+                prev_points = track['prev_points']
+                curr_points = points
+                
+                if len(prev_points) == len(curr_points):
+                    for prev_pt, curr_pt in zip(prev_points, curr_points):
+                        if prev_pt.shape == (1, 2) and curr_pt.shape == (1, 2):
+                            x1, y1 = prev_pt[0].astype(int)
+                            x2, y2 = curr_pt[0].astype(int)
+                            # 移動ベクトルを細い赤い矢印で描画
+                            cv2.arrowedLine(vis_image, (x1, y1), (x2, y2), red_color, 1, tipLength=0.2)
         
-        if len(tracks_list) == 0:
-            return np.empty((0, 5), dtype=np.float32), {}
-        
-        return np.array(tracks_list, dtype=np.float32), track_labels
+        return vis_image
     
+    def _get_track_color(self, track_id: int) -> Tuple[int, int, int]:
+        """トラックID別の色を生成"""
+        # 目的: トラック識別のための固定色を生成する目的で使用
+        colors = [
+            (0, 255, 0),    # 緑
+            (255, 0, 0),    # 青
+            (0, 0, 255),    # 赤
+            (255, 255, 0),  # シアン
+            (255, 0, 255),  # マゼンタ
+            (0, 255, 255),  # 黄
+            (128, 0, 128),  # 紫
+            (255, 165, 0),  # オレンジ
+        ]
+        return colors[track_id % len(colors)]
+
     def reset(self) -> None:
         """トラッカーリセット"""
         # 目的: 新規トラッキングセッション開始時に状態をクリアする目的で使用
@@ -379,22 +581,68 @@ class LangSamTracker:
         # 目的: 自然言語プロンプトによるゼロショット物体検出を実行する目的で使用
         return self.gdino.predict(images_pil, texts_prompt, box_threshold, text_threshold)
     
+    def process_frame(self,
+                     frame: np.ndarray,
+                     gdino_result: Optional[Dict[str, Any]] = None,
+                     reset_tracker: bool = False) -> Dict[str, Any]:
+        """統合フレーム処理（GroundingDINO結果とOpticalFlowトラッキング）"""
+        # 目的: GroundingDINO検出結果をOpticalFlowトラッキング用に変換して処理する目的で使用
+        
+        # トラッカーリセット（必要時）
+        if reset_tracker and gdino_result and len(gdino_result.get('boxes', [])) > 0:
+            self.clear_trackers()
+        
+        # 検出結果の形式変換（高速化）
+        if gdino_result and len(gdino_result.get('boxes', [])) > 0:
+            # PyTorchテンソルをnumpy配列に変換
+            # 目的: PyTorchテンソルをnumpy配列に変換してTensorのBoolean判定エラーを回避する目的で使用
+            boxes_tensor = gdino_result.get('boxes', [])
+            scores_tensor = gdino_result.get('scores', [])
+            
+            boxes_np = boxes_tensor.cpu().numpy() if hasattr(boxes_tensor, 'cpu') else np.array(boxes_tensor)
+            scores_np = scores_tensor.cpu().numpy() if hasattr(scores_tensor, 'cpu') else np.array(scores_tensor)
+            
+            # ベクトル化されたdetections配列の作成 [x1, y1, x2, y2, score]
+            if len(scores_np) > 0:
+                detections = np.column_stack([boxes_np, scores_np[:len(boxes_np)]])
+            else:
+                detections = np.column_stack([boxes_np, np.ones(len(boxes_np))])
+            
+            labels = gdino_result.get("labels", [])
+        else:
+            detections = []
+            labels = []
+        
+        # OpticalFlowトラッキング実行
+        return self.track(frame, detections, labels)
+    
     def track(self, 
              frame: np.ndarray,
              detections: Union[List, np.ndarray],
              labels: Optional[List[str]] = None) -> Dict[str, Any]:
-        """OpticalFlowトラッキング実行（特徴点版）"""
+        """OpticalFlowトラッキング実行（特徴点版・高速化）"""
         # 目的: 検出結果に対してOpticalFlowトラッキングを実行し、堅牢な追跡を実現する目的で使用
         tracks, track_labels = self.optical_tracker.update(frame, detections, labels)
         
-        result = {
-            "boxes": tracks[:, :4].tolist() if len(tracks) > 0 else [],
-            "labels": [track_labels.get(int(t[4]), "unknown") for t in tracks] if len(tracks) > 0 else [],
-            "scores": [1.0] * len(tracks),
-            "track_ids": tracks[:, 4].tolist() if len(tracks) > 0 else [],
+        # 高速化: 条件分岐を最小化
+        if len(tracks) > 0:
+            boxes = tracks[:, :4].tolist()
+            track_ids_list = tracks[:, 4].tolist()
+            labels_list = [track_labels.get(int(tid), "unknown") for tid in track_ids_list]
+            scores = [1.0] * len(tracks)
+        else:
+            boxes = []
+            track_ids_list = []
+            labels_list = []
+            scores = []
+        
+        return {
+            "boxes": boxes,
+            "labels": labels_list,
+            "scores": scores,
+            "track_ids": track_ids_list,
             "masks": []
         }
-        return result
     
     def visualize(self, 
                  image: np.ndarray,
@@ -403,27 +651,30 @@ class LangSamTracker:
         # 目的: 検出・追跡結果を画像上に可視化する目的で使用
         from .utils import draw_image
         
-        # result辞書から必要な要素を抽出
+        # result辞書から必要な要素を抽出（高速化）
         boxes = result.get("boxes", [])
         labels = result.get("labels", [])
         scores = result.get("scores", [])
         masks = result.get("masks", [])
         track_ids = result.get("track_ids", [])
         
-        # numpy配列に変換
-        if boxes:
-            xyxy = np.array(boxes, dtype=np.float32)
-            probs = np.array(scores, dtype=np.float32) if scores else np.ones(len(boxes), dtype=np.float32)
-        else:
-            xyxy = np.empty((0, 4), dtype=np.float32)
-            probs = np.empty(0, dtype=np.float32)
-            labels = []
+        # 事前チェックで処理を最適化
+        if not boxes:
+            return draw_image(
+                image_rgb=image,
+                masks=None,
+                xyxy=np.empty((0, 4), dtype=np.float32),
+                probs=np.empty(0, dtype=np.float32),
+                labels=[],
+                track_ids=[]
+            )
         
-        # マスクの処理
-        if masks and len(masks) > 0:
-            masks_array = np.array(masks)
-        else:
-            masks_array = None
+        # numpy配列に変換（高速化）
+        xyxy = np.array(boxes, dtype=np.float32)
+        probs = np.array(scores, dtype=np.float32) if scores else np.ones(len(boxes), dtype=np.float32)
+        
+        # マスクの処理（高速化）
+        masks_array = np.array(masks) if masks and len(masks) > 0 else None
         
         return draw_image(
             image_rgb=image,
@@ -433,6 +684,11 @@ class LangSamTracker:
             labels=labels,
             track_ids=track_ids
         )
+    
+    def visualize_optical_flow(self, image: np.ndarray) -> np.ndarray:
+        """OpticalFlow可視化（ハイブリッド版）"""
+        # 目的: draw_imageでBBOX・ラベルを描画し、OpenCVで特徴点・移動ベクトルを追加する目的で使用
+        return self.optical_tracker.visualize_optical_flow(image, use_draw_image=True)
     
     def clear_trackers(self) -> None:
         """トラッカークリア"""

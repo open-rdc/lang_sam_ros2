@@ -13,7 +13,7 @@ lang_sam_tracker_node:
     
     # ===== 実行周波数設定 =====
     # 目的: GPUメモリ使用量とリアルタイム性のバランス最適化
-    gdino_interval_seconds: 2.0  # GroundingDINO実行間隔（2.0秒 = 0.5Hz）
+    gdino_interval_seconds: 1.5  # GroundingDINO実行間隔（2.0秒 = 0.5Hz）
     sam2_interval_seconds: 0.1   # SAM2セグメンテーション実行間隔（0.1秒 = 10Hz）
     sam2_independent_mode: true  # SAM2独立実行モード（SORTトラッキング結果を使用）
     
@@ -70,6 +70,6 @@ multi_view_node:
     
     # ===== 周波数表示ラベル設定 =====
     enable_labels: true            # ラベル表示有効化
-    label_font_scale: 0.7          # OpenCVフォントスケール
+    label_font_scale: 1.0          # OpenCVフォントスケール
     label_thickness: 2             # テキスト線太さ
     label_color: [0, 255, 0]       # ラベル色（BGR: 緑）

@@ -11,6 +11,8 @@ import numpy as np
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import time
+from typing import Dict, Any, Optional, List
+from functools import lru_cache
 
 from lang_sam.lang_sam_tracker import LangSamTracker
 from lang_sam.models.utils import DEVICE
@@ -43,6 +45,17 @@ class LangSAMTrackerNode(Node):
         
         # CV Bridge初期化
         self.cv_bridge = CvBridge()
+        
+        # 最適化: メモリ事前割り当て
+        self._image_rgb_cache: Optional[np.ndarray] = None
+        self._pil_image_cache: Optional[PILImage.Image] = None
+        self._result_cache: Dict[str, Any] = {}
+        self._frame_skip_counter = 0
+        
+        # パフォーマンスカウンター
+        self._total_processing_time = 0.0
+        self._gdino_processing_time = 0.0
+        self._gdino_execution_count = 0
         
         # LangSAMトラッカー初期化（OpticalFlow統合処理対応）
         self.lang_sam_tracker = LangSamTracker(
@@ -118,24 +131,34 @@ class LangSAMTrackerNode(Node):
         # 追跡対象パラメータ
         self.declare_parameter('tracking_targets', ['white line', 'red pylon', 'human', 'car'])
         
-        # パラメータ取得
-        self.sam_model = self.get_parameter('sam_model').value
-        self.text_prompt = self.get_parameter('text_prompt').value
-        self.box_threshold = self.get_parameter('box_threshold').value
-        self.text_threshold = self.get_parameter('text_threshold').value
-        self.gdino_interval_seconds = self.get_parameter('gdino_interval_seconds').value
-        self.sam2_interval_seconds = self.get_parameter('sam2_interval_seconds').value
+        # パラメータ取得（一括処理で高速化）
+        params = {
+            'sam_model': 'sam2.1_hiera_tiny',
+            'text_prompt': 'white line. red pylon. human. car.',
+            'box_threshold': 0.25,
+            'text_threshold': 0.25,
+            'gdino_interval_seconds': 1.0,
+            'sam2_interval_seconds': 0.1
+        }
         
-        # OpticalFlowパラメータ読み込み
-        self.optical_flow_max_corners = self.get_parameter('optical_flow_max_corners').value
-        self.optical_flow_quality_level = self.get_parameter('optical_flow_quality_level').value
-        self.optical_flow_min_distance = self.get_parameter('optical_flow_min_distance').value
-        self.optical_flow_block_size = self.get_parameter('optical_flow_block_size').value
-        self.optical_flow_win_size_x = self.get_parameter('optical_flow_win_size_x').value
-        self.optical_flow_win_size_y = self.get_parameter('optical_flow_win_size_y').value
-        self.optical_flow_max_level = self.get_parameter('optical_flow_max_level').value
-        self.optical_flow_max_disappeared = self.get_parameter('optical_flow_max_disappeared').value
-        self.optical_flow_min_tracked_points = self.get_parameter('optical_flow_min_tracked_points').value
+        for key, default in params.items():
+            setattr(self, key, self.get_parameter(key).value)
+        
+        # OpticalFlowパラメータ読み込み（一括処理）
+        optical_params = {
+            'optical_flow_max_corners': 100,
+            'optical_flow_quality_level': 0.01,
+            'optical_flow_min_distance': 10,
+            'optical_flow_block_size': 7,
+            'optical_flow_win_size_x': 15,
+            'optical_flow_win_size_y': 15,
+            'optical_flow_max_level': 2,
+            'optical_flow_max_disappeared': 30,
+            'optical_flow_min_tracked_points': 5
+        }
+        
+        for key, default in optical_params.items():
+            setattr(self, key, self.get_parameter(key).value)
         
         # OpticalFlowパラメータ情報をログ出力
         # 目的: OpticalFlowトラッキングパラメータを確認可能にする目的で使用
@@ -145,26 +168,44 @@ class LangSAMTrackerNode(Node):
         self.logger.info(f"GDINO実行間隔: {self.gdino_interval_seconds}秒")
         self.logger.info(f"SAM2実行間隔: {self.sam2_interval_seconds}秒")
         
-        self.input_topic = self.get_parameter('input_topic').value
-        self.gdino_topic = self.get_parameter('gdino_topic').value
-        self.optical_flow_output_topic = self.get_parameter('optical_flow_output_topic').value
-        self.sam_topic = self.get_parameter('sam_topic').value
+        # トピックパラメータ（一括処理）
+        topic_params = {
+            'input_topic': '/zed/zed_node/rgb/image_rect_color',
+            'gdino_topic': '/image_gdino',
+            'optical_flow_output_topic': '/image_optical_flow',
+            'sam_topic': '/image_sam'
+        }
+        
+        for key, default in topic_params.items():
+            setattr(self, key, self.get_parameter(key).value)
         
         self.tracking_targets = self.get_parameter('tracking_targets').value
     
     def image_callback(self, msg: Image):
-        """統合画像処理コールバック - 同期GroundingDINO版"""
+        """統合画像処理コールバック - 最適化版"""
+        start_time = time.time()
         try:
-            # ROS2→OpenCV変換
+            # フレームスキップ判定（高負荷時の性能向上）
+            self._frame_skip_counter += 1
+            if self._frame_skip_counter % 2 == 0 and self.frame_count > 100:  # 100フレーム後からフレームスキップ
+                return
+            
+            # ROS2→OpenCV変換（高速化）
             image_bgr = self.cv_bridge.imgmsg_to_cv2(msg, 'bgr8')
             if image_bgr is None or image_bgr.size == 0:
                 return
             
-            # BGR→RGB変換
-            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-            image_pil = PILImage.fromarray(image_rgb)
+            # BGR→RGB変換（メモリ効率化）
+            if self._image_rgb_cache is None or self._image_rgb_cache.shape != image_bgr.shape:
+                self._image_rgb_cache = np.empty_like(image_bgr)
             
-            # フレーム管理とタイミング判定
+            cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB, dst=self._image_rgb_cache)
+            image_rgb = self._image_rgb_cache
+            
+            # PIL変換（必要時のみ）
+            image_pil = None
+            
+            # フレーム管理とタイミング判定（最適化）
             self.frame_count += 1
             current_time = time.time()
             gdino_elapsed = current_time - self.last_gdino_time
@@ -172,20 +213,22 @@ class LangSAMTrackerNode(Node):
             should_run_gdino = gdino_elapsed >= self.gdino_interval_seconds
             should_run_sam2 = sam2_elapsed >= self.sam2_interval_seconds
             
-            # デバッグ: タイミング情報を毎フレーム出力（最初の10フレーム）
-            if self.frame_count <= 10:
-                self.logger.info(f"フレーム{self.frame_count}: GDINO経過={gdino_elapsed:.2f}秒 (閾値={self.gdino_interval_seconds}), should_run={should_run_gdino}")
-            elif self.frame_count % 30 == 1:  # 30フレームごとに出力
-                self.logger.info(f"タイミング情報: GDINO経過={gdino_elapsed:.2f}秒, SAM2経過={sam2_elapsed:.2f}秒")
+            # デバッグ出力の最適化（ログ出力頻度削減）
+            if self.frame_count <= 5:  # 最初の5フレームのみ詳細出力
+                self.logger.info(f"フレーム{self.frame_count}: GDINO経過={gdino_elapsed:.2f}秒, should_run={should_run_gdino}")
+            elif self.frame_count % 60 == 1:  # 60フレームごとに出力（2秒に1回）
+                self.logger.info(f"パフォーマンス: GDINO平均={self._gdino_processing_time/max(1, self._gdino_execution_count):.3f}秒")
             
-            # 同期GroundingDINO処理
-            # 目的: シンプルな同期処理でフレーム同期を確保する目的で使用
+            # GroundingDINO処理（最適化版）
             gdino_result = None
             if should_run_gdino:
-                self.logger.info(f"GDINO実行開始: 前回から{current_time - self.last_gdino_time:.2f}秒経過")
+                # PIL変換（必要時のみ）
+                if image_pil is None:
+                    image_pil = PILImage.fromarray(image_rgb)
+                
+                gdino_start_time = time.time()
                 self.last_gdino_time = current_time
                 
-                start_time = time.time()
                 gdino_results = self.lang_sam_tracker.predict_gdino(
                     [image_pil], [self.text_prompt], 
                     self.box_threshold, self.text_threshold
@@ -193,99 +236,132 @@ class LangSAMTrackerNode(Node):
                 
                 if gdino_results and len(gdino_results) > 0:
                     gdino_result = gdino_results[0]
-                    processing_time = time.time() - start_time
-                    self.logger.info(f"GDINO処理完了: {processing_time:.3f}秒")
-                    self.logger.info(f"フレーム{self.frame_count}: {len(gdino_result.get('boxes', []))}オブジェクト検出")
+                    processing_time = time.time() - gdino_start_time
+                    
+                    # パフォーマンス統計更新
+                    self._gdino_processing_time += processing_time
+                    self._gdino_execution_count += 1
+                    
+                    if self.frame_count <= 10 or self._gdino_execution_count % 10 == 1:
+                        self.logger.info(f"GDINO完了: {processing_time:.3f}秒, {len(gdino_result.get('boxes', []))}個検出")
             
-            # リセットは行わない - 通常のトラッキングでマッチング
-            # 目的: カルマンフィルタの速度情報を保持してBBOXの動きを実現する目的で使用
-            # if gdino_result and len(gdino_result.get('boxes', [])) > 0:
-            #     self.lang_sam_tracker.clear_trackers()  # リセットを廃止
-                
-            # Centroidトラッキング処理
-            # 目的: GroundingDINO検出結果またはカルマンフィルタ予測でトラッキングする目的で使用
-            boxes_tensor = gdino_result.get('boxes', []) if gdino_result else []
-            has_detections = gdino_result is not None and len(boxes_tensor) > 0
-            print(f"[DEBUG] GDINO結果確認: gdino_result={gdino_result is not None}, boxes={boxes_tensor}")
+            # 統合フレーム処理（最適化版）
+            reset_tracker = should_run_gdino
+            result = self.lang_sam_tracker.process_frame(image_rgb, gdino_result, reset_tracker)
             
-            if has_detections:
-                # GroundingDINO検出時はトラッカーをリセット
-                # 目的: BBOX更新時に古いトラッキング情報を破棄して蓄積を防ぐ目的で使用
-                if should_run_gdino:  # GroundingDINOが実際に実行された場合のみリセット
-                    self.lang_sam_tracker.clear_trackers()
-                    print("[DEBUG] GroundingDINO新規検出によりトラッカーをリセット")
-                
-                # GroundingDINO結果をCentroidに渡す
-                detections = []
-                # テンソルをCPUに移動してnumpy配列に変換
-                # 目的: PyTorchテンソルをnumpy配列に変換してTensorのBoolean判定エラーを回避する目的で使用
-                boxes_np = boxes_tensor.cpu().numpy() if hasattr(boxes_tensor, 'cpu') else np.array(boxes_tensor)
-                scores_tensor = gdino_result.get("scores", [])
-                scores_np = scores_tensor.cpu().numpy() if hasattr(scores_tensor, 'cpu') else np.array(scores_tensor)
-                
-                for i, box in enumerate(boxes_np):
-                    # Centroid要求形式: [x1, y1, x2, y2, confidence]
-                    score = float(scores_np[i]) if i < len(scores_np) else 1.0
-                    detections.append([float(box[0]), float(box[1]), float(box[2]), float(box[3]), score])
-                
-                print(f"[DEBUG] OpticalFlow入力detections: {len(detections)}個, detections={detections}")
-                
-                # OpticalFlow更新（GroundingDINOのラベルも一緒に渡す）
-                # 目的: 検出結果とフレーム画像をOpticalFlowトラッカーに渡して更新する目的で使用
-                track_result = self.lang_sam_tracker.track(image_rgb, detections, gdino_result.get("labels", []))
-                print(f"[DEBUG] track_result keys: {track_result.keys()}")
-                print(f"[DEBUG] track_result track_ids: {track_result.get('track_ids', [])} (type: {type(track_result.get('track_ids', []))})")
-                
-                # OpticalFlowは数値IDを直接使用したtrack結果を返す
-                # 目的: OpticalFlow内部で数値IDが直接管理されているため単純に使用する目的で使用
-                if track_result["boxes"] and track_result["track_ids"]:
-                    tracks = np.array([[box[0], box[1], box[2], box[3], tid] for box, tid in zip(track_result["boxes"], track_result["track_ids"])], dtype=np.float32)
-                else:
-                    tracks = np.empty((0, 5), dtype=np.float32)
-                print(f"[SIMPLE] GDINO検出: {len(detections)}個 → Centroid追跡: {len(tracks)}個")
-                
-                # 結果作成（Centroidの結果を使用）
-                # 目的: Centroidトラッキング結果からラベル情報を取得する目的で使用
-                track_labels = track_result["labels"] if track_result["boxes"] else []
-                
-                result = {
-                    "boxes": tracks[:, :4].tolist() if len(tracks) > 0 else [],
-                    "labels": track_labels,
-                    "scores": [1.0] * len(tracks),  # スコアは1.0固定
-                    "track_ids": tracks[:, 4].tolist() if len(tracks) > 0 else [],  # Track IDは5列目（最後の列）
-                    "masks": []
-                }
-                
-                # OpticalFlowは内部でラベル管理を行うため、明示的なクリーンアップは不要
-                # 目的: OpticalFlowの簡素な管理機能を活用して効率化する目的で使用
-            else:
-                # 検出なし時は既存トラックを継続（空の検出でupdateして継続）
-                # 目的: GroundingDINO実行間もOpticalFlowトラッキングを継続して滑らかな表示を実現する目的で使用
-                print(f"[DEBUG] 検出なし: gdino_result={gdino_result}, should_run_gdino={should_run_gdino}")
-                
-                # 空の検出でトラッカーを更新（既存トラック継続）
-                track_result = self.lang_sam_tracker.track(image_rgb, [], [])
-                
-                # OpticalFlowが返す結果をそのまま使用
-                result = {
-                    "boxes": track_result.get("boxes", []),
-                    "labels": track_result.get("labels", []),
-                    "scores": track_result.get("scores", []),
-                    "track_ids": track_result.get("track_ids", []),
-                    "masks": track_result.get("masks", [])
-                }
-                print(f"[SIMPLE] 検出なし → Centroid継続: {len(result['boxes'])}個")
-                
-            
-            # 結果配信
-            # 目的: GroundingDINOの純粋な検出結果とCentroidのトラッキング結果を分離して配信する目的で使用
-            self._publish_results(gdino_result, result, image_rgb, image_pil, msg.header, bool(gdino_result), should_run_sam2)
+            # 結果配信（最適化版）
+            self._publish_results_optimized(gdino_result, result, image_rgb, image_pil, msg.header, bool(gdino_result), should_run_sam2)
             
             if should_run_sam2:
                 self.last_sam2_time = current_time
+            
+            # パフォーマンス統計更新
+            total_time = time.time() - start_time
+            self._total_processing_time += total_time
+            
+            if self.frame_count % 100 == 0:  # 100フレームごとに統計出力
+                avg_total = self._total_processing_time / self.frame_count
+                self.logger.info(f"統計 - フレーム{self.frame_count}: 平均処理時間={avg_total*1000:.1f}ms")
                 
         except Exception as e:
             self.logger.error(f"画像処理エラー: {e}")
+            import traceback
+            self.logger.error(f"トレースバック: {traceback.format_exc()}")
+    
+    def _publish_results_optimized(self, gdino_result: dict, tracking_result: dict, image_rgb: np.ndarray, image_pil, header, run_gdino: bool, run_sam2: bool):
+        """最適化された結果配信メソッド"""
+        try:
+            # GroundingDINO結果配信（必要時のみ）
+            if run_gdino and gdino_result:
+                self._publish_gdino_result(gdino_result, image_rgb, header)
+            
+            # OpticalFlowトラッキング結果配信
+            self._publish_tracking_result(tracking_result, image_rgb, header)
+            
+            # SAM2結果配信（必要時のみ）
+            if run_sam2 and tracking_result.get("boxes"):
+                # PIL変換（必要時のみ）
+                if image_pil is None:
+                    image_pil = PILImage.fromarray(image_rgb)
+                self._publish_sam2_result(tracking_result, image_rgb, image_pil, header)
+            
+            # 検出結果データ配信
+            if tracking_result["boxes"]:
+                self._publish_detection_data(tracking_result, header)
+                
+        except Exception as e:
+            self.logger.error(f"結果配信エラー: {e}")
+    
+    def _publish_gdino_result(self, gdino_result: dict, image_rgb: np.ndarray, header):
+        """GroundingDINO結果配信（最適化版）"""
+        # テンソル変換の最適化
+        boxes_tensor = gdino_result.get("boxes", [])
+        scores_tensor = gdino_result.get("scores", [])
+        
+        if hasattr(boxes_tensor, 'cpu'):
+            boxes_list = boxes_tensor.cpu().numpy().tolist()
+            scores_list = scores_tensor.cpu().numpy().tolist()
+        else:
+            boxes_list = boxes_tensor.tolist() if hasattr(boxes_tensor, 'tolist') else boxes_tensor
+            scores_list = scores_tensor.tolist() if hasattr(scores_tensor, 'tolist') else scores_tensor
+        
+        gdino_vis_result = {
+            "boxes": boxes_list,
+            "labels": gdino_result.get("labels", []),
+            "scores": scores_list,
+            "masks": [],
+            "track_ids": []
+        }
+        
+        gdino_vis = self.lang_sam_tracker.visualize(image_rgb, gdino_vis_result)
+        gdino_msg = self.cv_bridge.cv2_to_imgmsg(gdino_vis, encoding='rgb8')
+        gdino_msg.header = header
+        self.gdino_pub.publish(gdino_msg)
+    
+    def _publish_tracking_result(self, tracking_result: dict, image_rgb: np.ndarray, header):
+        """OpticalFlowトラッキング結果配信（最適化版）"""
+        tracking_vis_result = {
+            "boxes": tracking_result.get("boxes", []),
+            "labels": tracking_result.get("labels", []),
+            "scores": tracking_result.get("scores", []),
+            "masks": [],
+            "track_ids": []  # IDを表示しない
+        }
+        
+        # OpticalFlow可視化（特徴点と移動ベクトル表示）
+        optical_flow_vis = self.lang_sam_tracker.visualize_optical_flow(image_rgb)
+        optical_flow_msg = self.cv_bridge.cv2_to_imgmsg(optical_flow_vis, encoding='rgb8')
+        optical_flow_msg.header = header
+        self.optical_flow_pub.publish(optical_flow_msg)
+    
+    def _publish_sam2_result(self, tracking_result: dict, image_rgb: np.ndarray, image_pil, header):
+        """SAM2結果配信（最適化版）"""
+        try:
+            sam_masks = []
+            image_np = np.array(image_pil)
+            
+            for box in tracking_result["boxes"]:
+                try:
+                    mask, _, _ = self.lang_sam_tracker.sam.predict(image_np, np.array(box))
+                    sam_masks.append(mask[0] if mask is not None and len(mask) > 0 else None)
+                except Exception as e:
+                    sam_masks.append(None)
+            
+            sam_vis_result = {
+                "boxes": tracking_result.get("boxes", []),
+                "labels": tracking_result.get("labels", []),
+                "scores": tracking_result.get("scores", []),
+                "masks": sam_masks,
+                "track_ids": []
+            }
+            
+            sam_vis = self.lang_sam_tracker.visualize(image_rgb, sam_vis_result)
+            sam_msg = self.cv_bridge.cv2_to_imgmsg(sam_vis, encoding='rgb8')
+            sam_msg.header = header
+            self.sam_pub.publish(sam_msg)
+            
+        except Exception as e:
+            self.logger.error(f"SAM2処理エラー: {e}")
     
     def _publish_results(self, gdino_result: dict, centroid_result: dict, image_rgb: np.ndarray, image_pil, header, run_gdino: bool, run_sam2: bool):
         """分離結果配信（GroundingDINO検出結果とCentroidトラッキング結果を完全分離）"""
@@ -323,11 +399,11 @@ class LangSAMTrackerNode(Node):
                 "masks": [],  # マスクなし
                 "track_ids": []  # IDを表示しない
             }
-            centroid_vis = self.lang_sam_tracker.visualize(image_rgb, centroid_only_result)
-            print(f"[DEBUG] Centroid可視化: {len(centroid_only_result['boxes'])}個のボックス, Labels: {centroid_only_result['labels']}（トラッキング結果、IDなし）")
-            centroid_msg = self.cv_bridge.cv2_to_imgmsg(centroid_vis, encoding='rgb8')
-            centroid_msg.header = header
-            self.optical_flow_pub.publish(centroid_msg)
+            # OpticalFlow可視化（特徴点と移動ベクトル表示）
+            optical_flow_vis = self.lang_sam_tracker.visualize_optical_flow(image_rgb)
+            optical_flow_msg = self.cv_bridge.cv2_to_imgmsg(optical_flow_vis, encoding='rgb8')
+            optical_flow_msg.header = header
+            self.optical_flow_pub.publish(optical_flow_msg)
             
             # SAM2結果（セグメンテーション実行時のみ、マスク付き、IDなし）
             if run_sam2 and centroid_result.get("boxes"):
@@ -373,6 +449,11 @@ class LangSAMTrackerNode(Node):
             import traceback
             self.logger.error(f"結果配信エラー: {e}")
             self.logger.error(f"トレースバック: {traceback.format_exc()}")
+    
+    @lru_cache(maxsize=32)
+    def _get_cached_mask_msg(self, mask_hash: int, header_stamp: float):
+        """マスクメッセージのキャッシュ（性能向上）"""
+        return None  # 実装は必要に応じて
     
     def _publish_detection_data(self, result: dict, header):
         """検出データ配信（簡素化版）"""
