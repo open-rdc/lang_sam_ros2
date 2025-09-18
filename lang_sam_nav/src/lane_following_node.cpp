@@ -75,28 +75,32 @@ void LaneFollowingNode::detection_callback(const lang_sam_msgs::msg::DetectionRe
       return;
     }
 
-    // ピクセルベース検出＋線形近似
-    std::vector<cv::Point> left_pixels, right_pixels;
-    detectLanePixels(combined_mask, left_pixels, right_pixels);
+    // ハフ変換で直線検出
+    std::vector<cv::Vec4f> lines = detectLinesWithHough(combined_mask);
 
-    if (left_pixels.size() >= 10 && right_pixels.size() >= 10) {
-      // ピクセルから線形近似
-      cv::Vec4f left_line = fitLineFromPixels(left_pixels);
-      cv::Vec4f right_line = fitLineFromPixels(right_pixels);
+    if (lines.size() >= 2) {
+      // 左右の線を分類
+      auto [hough_left_line, hough_right_line, left_idx, right_idx] = classifyLeftRightLines(lines);
 
-      // 前回の結果を保存
-      last_left_line_ = left_line;
-      last_right_line_ = right_line;
+      if (left_idx != -1 && right_idx != -1) {
+        // ハフ線を線形近似で画像境界まで延長
+        cv::Vec4f left_line = extendLineWithFitting(hough_left_line);
+        cv::Vec4f right_line = extendLineWithFitting(hough_right_line);
 
-      // 交点計算と制御
-      cv::Point2f intersection = calculateIntersection(left_line, right_line);
+        // 前回の結果を保存
+        last_left_line_ = left_line;
+        last_right_line_ = right_line;
 
-      if (intersection.x >= 0 && intersection.y >= 0) {
-        last_intersection_ = intersection;
-        has_valid_lines_ = true;
-        publishControl();
-        publishVisualization(msg->header, {left_line, right_line}, intersection);
-        return;
+        // 交点計算と制御
+        cv::Point2f intersection = calculateIntersection(left_line, right_line);
+
+        if (intersection.x >= 0 && intersection.y >= 0) {
+          last_intersection_ = intersection;
+          has_valid_lines_ = true;
+          publishControl();
+          publishVisualization(msg->header, {left_line, right_line}, intersection);
+          return;
+        }
       }
     }
 
@@ -164,70 +168,23 @@ cv::Mat LaneFollowingNode::combine_masks(const std::vector<cv::Mat>& masks)
   return combined;
 }
 
-void LaneFollowingNode::detectLanePixels(const cv::Mat& mask, std::vector<cv::Point>& left_pixels, std::vector<cv::Point>& right_pixels)
+cv::Vec4f LaneFollowingNode::extendLineWithFitting(const cv::Vec4f& line)
 {
-  const int cols = mask.cols;
-  const int rows = mask.rows;
-  const int tolerance = 50;
+  // ハフ線の2点を取得
+  std::vector<cv::Point> points;
+  points.push_back(cv::Point(line[0], line[1]));
+  points.push_back(cv::Point(line[2], line[3]));
 
-  // 初期化
-  int left = 0;
-  int right = cols - 1;
-  int center = cols / 2;
-
-  left_pixels.clear();
-  right_pixels.clear();
-
-  // 下から上へスキャン
-  for (int row = rows - 1; row >= 0; --row) {
-    const auto row_ptr = mask.ptr<uchar>(row);
-    if (row_ptr[center]) break;
-
-    bool found_left = false;
-    const int left_bound = std::max(0, left - tolerance);
-    for (int col = center; col >= left_bound; --col) {
-      if (row_ptr[col]) {
-        left = col;
-        found_left = true;
-        break;
-      }
-    }
-
-    bool found_right = false;
-    const int right_bound = std::min(cols - 1, right + tolerance);
-    for (int col = center; col <= right_bound; ++col) {
-      if (row_ptr[col]) {
-        right = col;
-        found_right = true;
-        break;
-      }
-    }
-
-    center = (left + right) / 2;
-
-    if (found_left) left_pixels.emplace_back(left, row);
-    if (found_right) right_pixels.emplace_back(right, row);
-  }
-
-  RCLCPP_INFO(this->get_logger(), "検出ピクセル: 左=%zu, 右=%zu", left_pixels.size(), right_pixels.size());
-}
-
-cv::Vec4f LaneFollowingNode::fitLineFromPixels(const std::vector<cv::Point>& pixels)
-{
-  if (pixels.empty()) {
-    return cv::Vec4f(0, 0, 0, 0);
-  }
-
-  // 線形近似を実行
+  // 2点から線形近似を実行
   cv::Vec4f line_params;
-  cv::fitLine(pixels, line_params, cv::DIST_L2, 0, 0.01, 0.01);
+  cv::fitLine(points, line_params, cv::DIST_L2, 0, 0.01, 0.01);
 
   float vx = line_params[0];
   float vy = line_params[1];
   float x0 = line_params[2];
   float y0 = line_params[3];
 
-  // 画像境界での交点を計算
+  // 画像境界まで延長
   int x1, y1, x2, y2;
 
   if (std::abs(vy) > std::abs(vx)) {
@@ -249,6 +206,9 @@ cv::Vec4f LaneFollowingNode::fitLineFromPixels(const std::vector<cv::Point>& pix
     y1 = std::max(0, std::min(image_height_ - 1, y1));
     y2 = std::max(0, std::min(image_height_ - 1, y2));
   }
+
+  RCLCPP_INFO(this->get_logger(), "線延長: (%.0f,%.0f)-(%.0f,%.0f) → (%d,%d)-(%d,%d)",
+              line[0], line[1], line[2], line[3], x1, y1, x2, y2);
 
   return cv::Vec4f(x1, y1, x2, y2);
 }

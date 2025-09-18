@@ -29,10 +29,9 @@ private:
   // 処理関数
   std::vector<cv::Mat> extract_white_line_masks(const lang_sam_msgs::msg::DetectionResult::SharedPtr msg);
   cv::Mat combine_masks(const std::vector<cv::Mat>& masks);
-  void detectLanePixels(const cv::Mat& mask, std::vector<cv::Point>& left_pixels, std::vector<cv::Point>& right_pixels);
-  cv::Vec4f fitLineFromPixels(const std::vector<cv::Point>& pixels);
   std::vector<cv::Vec4f> detectLinesWithHough(const cv::Mat& mask);
   std::tuple<cv::Vec4f, cv::Vec4f, int, int> classifyLeftRightLines(const std::vector<cv::Vec4f>& lines);
+  cv::Vec4f extendLineWithFitting(const cv::Vec4f& line);
   cv::Point2f calculateIntersection(const cv::Vec4f& left_line, const cv::Vec4f& right_line);
   double calculateControl(const cv::Point2f& intersection);
   void publishControl();
