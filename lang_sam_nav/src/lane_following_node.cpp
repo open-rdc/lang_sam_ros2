@@ -75,7 +75,7 @@ void LaneFollowingNode::detection_callback(const lang_sam_msgs::msg::DetectionRe
       return;
     }
 
-    // YOLOPv2スタイルのピクセルベース検出
+    // ピクセルベース検出＋線形近似
     std::vector<cv::Point> left_pixels, right_pixels;
     detectLanePixels(combined_mask, left_pixels, right_pixels);
 
@@ -251,6 +251,75 @@ cv::Vec4f LaneFollowingNode::fitLineFromPixels(const std::vector<cv::Point>& pix
   }
 
   return cv::Vec4f(x1, y1, x2, y2);
+}
+
+std::vector<cv::Vec4f> LaneFollowingNode::detectLinesWithHough(const cv::Mat& mask)
+{
+  std::vector<cv::Vec4f> result_lines;
+  std::vector<cv::Vec4i> lines;
+
+  // ハフ変換で直線検出
+  cv::HoughLinesP(mask, lines, 1, CV_PI/180, 50, 50, 10);
+
+  // Vec4iからVec4fへ変換
+  for (const auto& line : lines) {
+    result_lines.push_back(cv::Vec4f(line[0], line[1], line[2], line[3]));
+  }
+
+  RCLCPP_INFO(this->get_logger(), "ハフ変換検出線数: %zu", result_lines.size());
+  return result_lines;
+}
+
+std::tuple<cv::Vec4f, cv::Vec4f, int, int> LaneFollowingNode::classifyLeftRightLines(const std::vector<cv::Vec4f>& lines)
+{
+  cv::Vec4f left_line(0, 0, 0, 0);
+  cv::Vec4f right_line(0, 0, 0, 0);
+  int left_idx = -1;
+  int right_idx = -1;
+
+  float center_x = image_width_ / 2.0f;
+
+  float best_left_score = -1;
+  float best_right_score = -1;
+
+  for (size_t i = 0; i < lines.size(); ++i) {
+    const auto& line = lines[i];
+
+    // 線の中点を計算
+    float mid_x = (line[0] + line[2]) / 2.0f;
+
+    // 垂直性を計算（垂直に近いほどスコアが高い）
+    float dx = std::abs(line[2] - line[0]);
+    float dy = std::abs(line[3] - line[1]);
+    float verticality = dy / (dx + 1e-6);
+
+    // 線の長さ
+    float length = std::sqrt(dx * dx + dy * dy);
+
+    // スコア計算（垂直性と長さを考慮）
+    float score = verticality * length;
+
+    // 左右に分類
+    if (mid_x < center_x) {
+      // 左側の線
+      if (score > best_left_score) {
+        best_left_score = score;
+        left_line = line;
+        left_idx = i;
+      }
+    } else {
+      // 右側の線
+      if (score > best_right_score) {
+        best_right_score = score;
+        right_line = line;
+        right_idx = i;
+      }
+    }
+  }
+
+  RCLCPP_INFO(this->get_logger(), "左線インデックス: %d, 右線インデックス: %d", left_idx, right_idx);
+
+  return {left_line, right_line, left_idx, right_idx};
 }
 
 cv::Point2f LaneFollowingNode::calculateIntersection(const cv::Vec4f& left_line, const cv::Vec4f& right_line)
