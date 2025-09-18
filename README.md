@@ -3,11 +3,11 @@
 本パッケージは，**Language Segment-Anything** を ROS 2 で使用できるようにしたものです．
 
 ---
-#### 概要
-**Language Segment-Anything** と **オプティカルフロー処理** を統合することで， 
-<strong>ゼロショットで高速なトラッキング</strong> を実現しています．
+#### 概要（後日修正予定）
+**Language Segment-Anything** と **CSRT（Channel and Spatial Reliability Tracking）** を統合することで， 
+<strong>ゼロショットで高精度なオブジェクトトラッキング</strong> を実現しています．
 
-下図左は LangSAM のマスク出力，右はそのマスクをオプティカルフローでトラッキングした結果です．
+下図左は LangSAM のマスク出力，右はそのマスクをCSRTでトラッキングした結果です．
 
 <div align="center">
   <table>
@@ -17,7 +17,7 @@
     </tr>
     <tr>
       <td align="center"><b>LangSAM 出力<br>text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."</b></td>
-      <td align="center"><b>オプティカルフローによる追跡<br>tracking_targets: "white line. human. red pylon. car. mobility."</b></td>
+      <td align="center"><b>CSRTによる追跡<br>tracking_targets: "white line. human. red pylon. car. mobility."</b></td>
     </tr>
   </table>
 </div>
@@ -29,7 +29,7 @@ https://github.com/luca-medeiros/lang-segment-anything
 
 ---
 #### このリポジトリのインストール
-```
+```bash
 mkdir -p ros2_ws/src
 cd ros2_ws/src
 git clone https://github.com/open-rdc/lang_sam_ros2.git
@@ -39,9 +39,10 @@ source install/setup.bash
 ```
 ---
 #### 起動
+```bash
+ros2 launch lang_sam_executor lang_segment_anything.launch.py
 ```
-ros2 launch lang_sam_wrapper lang_segment_anything.launch.py
-```
+
 ---
 #### License
 This project is licensed under the Apache 2.0 License
