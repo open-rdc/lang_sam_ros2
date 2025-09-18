@@ -274,21 +274,25 @@ class LangSAMTrackerNode(Node):
             # GroundingDINO結果配信（必要時のみ）
             if run_gdino and gdino_result:
                 self._publish_gdino_result(gdino_result, image_rgb, header)
-            
+
             # OpticalFlowトラッキング結果配信
             self._publish_tracking_result(tracking_result, image_rgb, header)
-            
-            # SAM2結果配信（必要時のみ）
+
+            # SAM2結果配信とDetectionResult配信
             if run_sam2 and tracking_result.get("boxes"):
                 # PIL変換（必要時のみ）
                 if image_pil is None:
                     image_pil = PILImage.fromarray(image_rgb)
-                self._publish_sam2_result(tracking_result, image_rgb, image_pil, header)
-            
-            # 検出結果データ配信
-            if tracking_result["boxes"]:
-                self._publish_detection_data(tracking_result, header)
-                
+                # SAM2マスク付き結果を取得して配信
+                sam_result_with_masks = self._publish_sam2_result_and_get_masks(tracking_result, image_rgb, image_pil, header)
+                # マスク付き検出結果を配信
+                if sam_result_with_masks and sam_result_with_masks.get("boxes"):
+                    self._publish_detection_data(sam_result_with_masks, header)
+            else:
+                # SAM2なしの場合は通常の検出結果を配信
+                if tracking_result["boxes"]:
+                    self._publish_detection_data(tracking_result, header)
+
         except Exception as e:
             self.logger.error(f"結果配信エラー: {e}")
     
@@ -334,19 +338,19 @@ class LangSAMTrackerNode(Node):
         optical_flow_msg.header = header
         self.optical_flow_pub.publish(optical_flow_msg)
     
-    def _publish_sam2_result(self, tracking_result: dict, image_rgb: np.ndarray, image_pil, header):
-        """SAM2結果配信"""
+    def _publish_sam2_result_and_get_masks(self, tracking_result: dict, image_rgb: np.ndarray, image_pil, header):
+        """SAM2結果配信とマスク付き結果を返す"""
         try:
             sam_masks = []
             image_np = np.array(image_pil)
-            
+
             for box in tracking_result["boxes"]:
                 try:
                     mask, _, _ = self.lang_sam_tracker.sam.predict(image_np, np.array(box))
                     sam_masks.append(mask[0] if mask is not None and len(mask) > 0 else None)
                 except Exception as e:
                     sam_masks.append(None)
-            
+
             sam_vis_result = {
                 "boxes": tracking_result.get("boxes", []),
                 "labels": tracking_result.get("labels", []),
@@ -354,14 +358,19 @@ class LangSAMTrackerNode(Node):
                 "masks": sam_masks,
                 "track_ids": []
             }
-            
+
+            # 可視化画像を配信
             sam_vis = self.lang_sam_tracker.visualize(image_rgb, sam_vis_result)
             sam_msg = self.cv_bridge.cv2_to_imgmsg(sam_vis, encoding='rgb8')
             sam_msg.header = header
             self.sam_pub.publish(sam_msg)
-            
+
+            # マスク付き結果を返す（DetectionResult用）
+            return sam_vis_result
+
         except Exception as e:
             self.logger.error(f"SAM2処理エラー: {e}")
+            return None
     
     def _publish_results(self, gdino_result: dict, centroid_result: dict, image_rgb: np.ndarray, image_pil, header, run_gdino: bool, run_sam2: bool):
         """分離結果配信（GroundingDINO検出結果とCentroidトラッキング結果を完全分離）"""

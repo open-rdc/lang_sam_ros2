@@ -18,15 +18,14 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(lang_sam_msgs REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui imgcodecs ximgproc)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui imgcodecs)
 
 # Include directories
 include_directories(include)
 
 # Create lane_following_node executable
-add_executable(lane_following_node 
+add_executable(lane_following_node
   src/lane_following_node.cpp
-  src/lane_pixel_finder.cpp
 )
 
 # Dependencies for lane_following_node

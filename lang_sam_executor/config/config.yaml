@@ -4,8 +4,8 @@ lang_sam_tracker_node:
   ros__parameters:
     # ===== AIモデル設定 =====
     # 目的: GroundingDINO/SAM2モデルの選択と闾値設定で精度を制御
-    sam_model: "sam2.1_hiera_tiny"  # SAM2モデル（tiny/small/base/large）
-    text_prompt: "white line. red pylon. human. car."  # GroundingDINO検出プロンプト
+    sam_model: "sam2.1_hiera_small"  # SAM2モデル（tiny/small/base/large）
+    text_prompt: "white line. road."  # GroundingDINO検出プロンプト
     # 目的: 自然言語で物体を指定してゼロショット検出を実現
     box_threshold: 0.3  # GroundingDINO BoundingBox信頼度閾値
     text_threshold: 0.25  # GroundingDINO テキスト類似度閾値
@@ -50,10 +50,14 @@ lane_following_node:
     kp: 1.0                        # P制御ゲイン（比例制御のみ使用）
     max_angular_velocity: 1.0      # 最大角速度（rad/s）
     original_image_topic: "/zed/zed_node/rgb/image_rect_color"  # 元画像トピック
-    
-    # ===== ピクセル検出パラメータ =====
-    pixel_tolerance: 100           # ピクセル探索範囲（大きめに設定）
-    
+
+    # ===== スムージングパラメータ =====
+    # 目的: 連続的で滑らかな制御を実現する目的でスムージング機能を提供
+    smoothing_alpha: 0.3           # 指数移動平均の係数（0.1-0.5推奨、小さいほど滑らか）
+    use_smoothing: true            # スムージング有効化フラグ
+    use_prediction: true           # 検出失敗時の予測制御有効化フラグ
+    max_prediction_frames: 10      # 検出失敗時の最大予測継続フレーム数（3-15推奨）
+
     # ===== 可視化パラメータ =====
     enable_visualization: true     # 可視化有効化フラグ
     line_thickness: 3              # 線の太さ（pixel）

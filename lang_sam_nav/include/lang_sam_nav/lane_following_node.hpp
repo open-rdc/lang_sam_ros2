@@ -6,9 +6,8 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
-#include <opencv2/ximgproc.hpp>
+#include <opencv2/imgproc.hpp>
 #include <lang_sam_msgs/msg/detection_result.hpp>
-#include "lang_sam_nav/lane_pixel_finder.hpp"
 
 #include <memory>
 #include <vector>
@@ -27,25 +26,18 @@ private:
   void detection_callback(const lang_sam_msgs::msg::DetectionResult::SharedPtr msg);
   void original_image_callback(const sensor_msgs::msg::Image::SharedPtr msg);
 
-  // YOLOP Nav互換の処理関数
+  // 処理関数
   std::vector<cv::Mat> extract_white_line_masks(const lang_sam_msgs::msg::DetectionResult::SharedPtr msg);
   cv::Mat combine_masks(const std::vector<cv::Mat>& masks);
-  cv::Mat skeletonize(const cv::Mat& mask);
-  cv::Mat denoise(const cv::Mat& image);
-  cv::Mat filterHorizontalLines(const cv::Mat& image);
-  std::pair<cv::Vec4f, cv::Vec4f> fitLaneLines(const std::vector<cv::Point>& left_pixels, 
-                                                const std::vector<cv::Point>& right_pixels);
+  void detectLanePixels(const cv::Mat& mask, std::vector<cv::Point>& left_pixels, std::vector<cv::Point>& right_pixels);
+  cv::Vec4f fitLineFromPixels(const std::vector<cv::Point>& pixels);
   cv::Point2f calculateIntersection(const cv::Vec4f& left_line, const cv::Vec4f& right_line);
   double calculateControl(const cv::Point2f& intersection);
+  void publishControl();
   
   // 可視化
-  void publishVisualization(const cv::Mat& base_image,
-                           const std_msgs::msg::Header& header,
-                           const std::vector<cv::Point>& left_pixels,
-                           const std::vector<cv::Point>& right_pixels,
-                           const std::vector<cv::Point>& center_pixels,
-                           const cv::Vec4f& left_line,
-                           const cv::Vec4f& right_line,
+  void publishVisualization(const std_msgs::msg::Header& header,
+                           const std::vector<cv::Vec4f>& lane_lines,
                            const cv::Point2f& intersection);
 
   // ROS2 パブリッシャー・サブスクライバー
@@ -54,12 +46,11 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr visualization_pub_;
 
-  // パラメータ（YOLOP Nav互換）
+  // パラメータ
   double linear_velocity_;
-  double kp_;  // P制御のみ使用
+  double kp_;
   double max_angular_velocity_;
   std::string original_image_topic_;
-  int pixel_tolerance_;
   bool enable_visualization_;
   int line_thickness_;
   int circle_radius_;
@@ -72,10 +63,8 @@ private:
   bool has_valid_lines_;
   int image_width_;
   int image_height_;
-  
-  // LanePixelFinder
-  std::unique_ptr<LanePixelFinder> pixel_finder_;
-  
+
+
   // CV Bridge
   cv_bridge::CvImagePtr cv_bridge_ptr_;
 };
