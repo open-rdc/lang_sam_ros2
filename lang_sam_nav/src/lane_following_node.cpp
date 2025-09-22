@@ -58,6 +58,7 @@ LaneFollowingNode::LaneFollowingNode(const rclcpp::NodeOptions & options)
   // パブリッシャー作成
   cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
   visualization_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/lane_following_visualization", 10);
+  pylon_area_pub_ = this->create_publisher<std_msgs::msg::Float64>("/red_pylon_area", 10);  // red pylon面積配信の目的でFloat64パブリッシャー使用
 
   RCLCPP_INFO(this->get_logger(), "Lane Following Node 初期化完了");
 }
@@ -261,6 +262,13 @@ bool LaneFollowingNode::checkRedPylonStop(const lang_sam_msgs::msg::DetectionRes
         // RCLCPP_INFO(this->get_logger(), "red pylonバウンディングボックス面積: %.1f (%.1fx%.1f)", area, width, height);
       }
     }
+  }
+
+  // red pylon面積をパブリッシュ（検出された場合のみ）
+  if (found_red_pylon) {
+    std_msgs::msg::Float64 area_msg;
+    area_msg.data = max_area;
+    pylon_area_pub_->publish(area_msg);
   }
 
   bool should_stop = found_red_pylon && (max_area >= red_pylon_stop_threshold_);

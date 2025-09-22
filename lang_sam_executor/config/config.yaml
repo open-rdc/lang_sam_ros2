@@ -14,12 +14,12 @@ lang_sam_tracker_node:
     # ===== 実行周波数設定 =====
     # 目的: GPUメモリ使用量とリアルタイム性のバランス最適化
     gdino_interval_seconds: 5.0  # GroundingDINO実行間隔（5.0秒 = 0.2Hz）
-    sam2_interval_seconds: 0.2   # SAM2セグメンテーション実行間隔（0.2秒 = 5Hz）
+    sam2_interval_seconds: 0.1   # SAM2セグメンテーション実行間隔（0.2秒 = 5Hz）
     
     # ===== ROS2トピック設定 =====
     # 目的: モジュラーシステム構築で各コンポーネントを分離
     # input_topic: "/image_raw"  # 入力画像（simulator）
-    input_topic: "/zed/zed_node/rgb/image_rect_color"  # 入力画像（ZEDカメラ）
+    input_topic: "/zed_node/rgb/image_rect_color"  # 入力画像（ZEDカメラ）
     gdino_topic: "/image_gdino"    # GroundingDINO検出結果配信
     optical_flow_output_topic: "/image_optical_flow"      # OpticalFlow追跡結果配信
     sam_topic: "/image_sam"        # SAM2セグメンテーション結果配信
@@ -50,7 +50,7 @@ lane_following_node:
     ki: 0.1                        # I制御ゲイン（積分項）
     kd: 0.05                       # D制御ゲイン（微分項）
     max_angular_velocity: 1.0      # 最大角速度（rad/s）
-    original_image_topic: "/zed/zed_node/rgb/image_rect_color"  # 元画像トピック
+    original_image_topic: "/zed_node/rgb/image_rect_color"  # 元画像トピック
 
     # ===== スムージングパラメータ =====
     # 目的: 連続的で滑らかな制御を実現する目的でスムージング機能を提供
@@ -66,6 +66,7 @@ lane_following_node:
 
     # ===== 停止制御パラメータ =====
     red_pylon_stop_threshold: 10000.0  # red pylon停止しきい値（バウンディングボックス面積）
+    red_pylon_area_topic: "/red_pylon_area"  # red pylon面積配信トピック
 
 multi_view_node:
   ros__parameters:

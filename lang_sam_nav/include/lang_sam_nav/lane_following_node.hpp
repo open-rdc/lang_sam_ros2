@@ -4,6 +4,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <std_msgs/msg/float64.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/imgproc.hpp>
@@ -47,6 +48,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr original_image_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr visualization_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr pylon_area_pub_;  // red pylon面積配信の目的でFloat64メッセージ使用
 
   // パラメータ
   double linear_velocity_;
