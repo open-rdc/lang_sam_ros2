@@ -5,7 +5,7 @@ lang_sam_tracker_node:
     # ===== AIモデル設定 =====
     # 目的: GroundingDINO/SAM2モデルの選択と闾値設定で精度を制御
     sam_model: "sam2.1_hiera_small"  # SAM2モデル（tiny/small/base/large）
-    text_prompt: "white line. road."  # GroundingDINO検出プロンプト
+    text_prompt: "white line. road. red pylon."  # GroundingDINO検出プロンプト
     # 目的: 自然言語で物体を指定してゼロショット検出を実現
     box_threshold: 0.3  # GroundingDINO BoundingBox信頼度閾値
     text_threshold: 0.25  # GroundingDINO テキスト類似度閾値
@@ -13,9 +13,8 @@ lang_sam_tracker_node:
     
     # ===== 実行周波数設定 =====
     # 目的: GPUメモリ使用量とリアルタイム性のバランス最適化
-    gdino_interval_seconds: 1.5  # GroundingDINO実行間隔（2.0秒 = 0.5Hz）
-    sam2_interval_seconds: 0.1   # SAM2セグメンテーション実行間隔（0.1秒 = 10Hz）
-    sam2_independent_mode: true  # SAM2独立実行モード（SORTトラッキング結果を使用）
+    gdino_interval_seconds: 5.0  # GroundingDINO実行間隔（5.0秒 = 0.2Hz）
+    sam2_interval_seconds: 0.2   # SAM2セグメンテーション実行間隔（0.2秒 = 5Hz）
     
     # ===== ROS2トピック設定 =====
     # 目的: モジュラーシステム構築で各コンポーネントを分離
@@ -46,8 +45,10 @@ lang_sam_tracker_node:
 lane_following_node:
   ros__parameters:
     # ===== 制御パラメータ =====
-    linear_velocity: 1.0           # 前進速度（m/s）
-    kp: 1.0                        # P制御ゲイン（比例制御のみ使用）
+    linear_velocity: 1.66667           # 前進速度（m/s）6km/h
+    kp: 1.0                        # P制御ゲイン（比例項）
+    ki: 0.1                        # I制御ゲイン（積分項）
+    kd: 0.05                       # D制御ゲイン（微分項）
     max_angular_velocity: 1.0      # 最大角速度（rad/s）
     original_image_topic: "/zed/zed_node/rgb/image_rect_color"  # 元画像トピック
 
@@ -62,6 +63,9 @@ lane_following_node:
     enable_visualization: true     # 可視化有効化フラグ
     line_thickness: 3              # 線の太さ（pixel）
     circle_radius: 10              # 円の半径（pixel）
+
+    # ===== 停止制御パラメータ =====
+    red_pylon_stop_threshold: 10000.0  # red pylon停止しきい値（バウンディングボックス面積）
 
 multi_view_node:
   ros__parameters:

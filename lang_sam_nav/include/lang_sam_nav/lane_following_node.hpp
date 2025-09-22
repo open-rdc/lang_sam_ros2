@@ -34,7 +34,8 @@ private:
   cv::Vec4f extendLineWithFitting(const cv::Vec4f& line);
   cv::Point2f calculateIntersection(const cv::Vec4f& left_line, const cv::Vec4f& right_line);
   double calculateControl(const cv::Point2f& intersection);
-  void publishControl();
+  bool checkRedPylonStop(const lang_sam_msgs::msg::DetectionResult::SharedPtr msg);
+  void publishControl(bool should_stop = false);
   
   // 可視化
   void publishVisualization(const std_msgs::msg::Header& header,
@@ -50,11 +51,14 @@ private:
   // パラメータ
   double linear_velocity_;
   double kp_;
+  double ki_;
+  double kd_;
   double max_angular_velocity_;
   std::string original_image_topic_;
   bool enable_visualization_;
   int line_thickness_;
   int circle_radius_;
+  double red_pylon_stop_threshold_;  // red pylon停止しきい値（バウンディングボックス面積）
 
   // 状態変数
   cv::Mat latest_original_image_;
@@ -64,6 +68,11 @@ private:
   bool has_valid_lines_;
   int image_width_;
   int image_height_;
+
+  // PID制御用状態変数
+  double error_integral_;
+  double last_error_;
+  rclcpp::Time last_control_time_;
 
 
   // CV Bridge

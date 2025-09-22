@@ -50,7 +50,7 @@ def generate_launch_description():
         parameters=[LaunchConfiguration('config')],
         output='screen',
         emulate_tty=True,
-        arguments=['--ros-args', '--log-level', 'info'] if not LaunchConfiguration('debug') else ['--ros-args', '--log-level', 'debug'],
+        arguments=['--ros-args', '--log-level', 'info'],
         respawn=True,
         respawn_delay=3.0,
         condition=IfCondition(LaunchConfiguration('enable_navigation'))
