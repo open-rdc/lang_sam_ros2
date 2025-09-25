@@ -5,7 +5,7 @@ lang_sam_tracker_node:
     # ===== AIモデル設定 =====
     # 目的: GroundingDINO/SAM2モデルの選択と闾値設定で精度を制御
     sam_model: "sam2.1_hiera_small"  # SAM2モデル（tiny/small/base/large）
-    text_prompt: "white line. road. red pylon."  # GroundingDINO検出プロンプト
+    text_prompt: "white line. road. red pylon. iron wall. building."  # GroundingDINO検出プロンプト
     # 目的: 自然言語で物体を指定してゼロショット検出を実現
     box_threshold: 0.3  # GroundingDINO BoundingBox信頼度閾値
     text_threshold: 0.25  # GroundingDINO テキスト類似度閾値
@@ -13,8 +13,8 @@ lang_sam_tracker_node:
     
     # ===== 実行周波数設定 =====
     # 目的: GPUメモリ使用量とリアルタイム性のバランス最適化
-    gdino_interval_seconds: 5.0  # GroundingDINO実行間隔（5.0秒 = 0.2Hz）
-    sam2_interval_seconds: 0.1   # SAM2セグメンテーション実行間隔（0.2秒 = 5Hz）
+    gdino_interval_seconds: 2.0  # GroundingDINO実行間隔（5.0秒 = 0.2Hz）
+    sam2_interval_seconds: 0.2   # SAM2セグメンテーション実行間隔（0.1秒 = 10Hz）
     
     # ===== ROS2トピック設定 =====
     # 目的: モジュラーシステム構築で各コンポーネントを分離
@@ -30,7 +30,7 @@ lang_sam_tracker_node:
     # 特徴点検出パラメータ（増やすと精度向上、処理負荷増加）
     optical_flow_max_corners: 100         # 抽出する最大特徴点数（50-200推奨）
     optical_flow_quality_level: 0.01      # 特徴点の品質レベル閾値（0.001-0.1、小さいほど多くの点を検出）
-    optical_flow_min_distance: 10         # 特徴点間の最小距離（5-30ピクセル、密集度制御）
+    optical_flow_min_distance: 3         # 特徴点間の最小距離（5-30ピクセル、密集度制御）
     optical_flow_block_size: 7            # 特徴点検出のブロックサイズ（3-21の奇数、大きいほど安定）
     
     # OpticalFlow追跡パラメータ（大きいほど大きな動きに対応、処理負荷増加）
@@ -40,16 +40,17 @@ lang_sam_tracker_node:
     
     # トラック管理パラメータ
     optical_flow_max_disappeared: 60      # トラック削除までの最大未検出フレーム数（10-60）
-    optical_flow_min_tracked_points: 3    # トラック維持に必要な最小特徴点数（3-10、安定性重視）
+    optical_flow_min_tracked_points: 2    # トラック維持に必要な最小特徴点数（3-10、安定性重視）
 
 lane_following_node:
   ros__parameters:
     # ===== 制御パラメータ =====
     linear_velocity: 1.66667           # 前進速度（m/s）6km/h
-    kp: 1.0                        # P制御ゲイン（比例項）
-    ki: 0.1                        # I制御ゲイン（積分項）
-    kd: 0.05                       # D制御ゲイン（微分項）
-    max_angular_velocity: 1.0      # 最大角速度（rad/s）
+    # linear_velocity: 0.5
+    kp: 4.0                        # P制御ゲイン（比例項）
+    ki: 0.0                        # I制御ゲイン（積分項）
+    kd: 0.3                       # D制御ゲイン（微分項）
+    max_angular_velocity: 3.14      # 最大角速度（rad/s）
     original_image_topic: "/zed_node/rgb/image_rect_color"  # 元画像トピック
 
     # ===== スムージングパラメータ =====
@@ -65,7 +66,7 @@ lane_following_node:
     circle_radius: 10              # 円の半径（pixel）
 
     # ===== 停止制御パラメータ =====
-    red_pylon_stop_threshold: 10000.0  # red pylon停止しきい値（バウンディングボックス面積）
+    red_pylon_stop_threshold: 350.0  # red pylon停止しきい値（バウンディングボックス面積）
     red_pylon_area_topic: "/red_pylon_area"  # red pylon面積配信トピック
 
 multi_view_node:

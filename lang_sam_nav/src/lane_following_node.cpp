@@ -13,6 +13,10 @@ LaneFollowingNode::LaneFollowingNode(const rclcpp::NodeOptions & options)
   has_valid_lines_(false),
   image_width_(0),
   image_height_(0),
+  last_left_slope_(0.0),
+  last_right_slope_(0.0),
+  has_valid_slopes_(false),
+  permanent_stop_(false),
   error_integral_(0.0),
   last_error_(0.0)
 {
@@ -27,6 +31,9 @@ LaneFollowingNode::LaneFollowingNode(const rclcpp::NodeOptions & options)
   this->declare_parameter("line_thickness", 3);
   this->declare_parameter("circle_radius", 10);
   this->declare_parameter("red_pylon_stop_threshold", 10000.0);
+  this->declare_parameter("enable_thinning", true);
+  this->declare_parameter("slope_smoothing_factor", 0.7);
+  this->declare_parameter("max_slope_change", 0.5);
 
   // パラメータ取得
   linear_velocity_ = this->get_parameter("linear_velocity").as_double();
@@ -39,6 +46,9 @@ LaneFollowingNode::LaneFollowingNode(const rclcpp::NodeOptions & options)
   line_thickness_ = this->get_parameter("line_thickness").as_int();
   circle_radius_ = this->get_parameter("circle_radius").as_int();
   red_pylon_stop_threshold_ = this->get_parameter("red_pylon_stop_threshold").as_double();
+  enable_thinning_ = this->get_parameter("enable_thinning").as_bool();
+  slope_smoothing_factor_ = this->get_parameter("slope_smoothing_factor").as_double();
+  max_slope_change_ = this->get_parameter("max_slope_change").as_double();
 
   // CV Bridge初期化
   cv_bridge_ptr_ = std::make_shared<cv_bridge::CvImage>();
@@ -89,6 +99,12 @@ void LaneFollowingNode::detection_callback(const lang_sam_msgs::msg::DetectionRe
 
     // red pylon検出で停止判定
     bool should_stop = checkRedPylonStop(msg);
+
+    // 永続停止状態の場合は早期リターン（ハフ変換をスキップ）
+    if (permanent_stop_) {
+      publishControl(true);  // 停止コマンドを送信
+      return;
+    }
 
     // ハフ変換で直線検出
     std::vector<cv::Vec4f> lines = detectLinesWithHough(combined_mask);
@@ -230,6 +246,11 @@ cv::Vec4f LaneFollowingNode::extendLineWithFitting(const cv::Vec4f& line)
 
 bool LaneFollowingNode::checkRedPylonStop(const lang_sam_msgs::msg::DetectionResult::SharedPtr msg)
 {
+  // 既に永続停止状態の場合は処理をスキップして停止を継続
+  if (permanent_stop_) {
+    return true;
+  }
+
   double max_area = 0.0;
   bool found_red_pylon = false;
 
@@ -237,29 +258,14 @@ bool LaneFollowingNode::checkRedPylonStop(const lang_sam_msgs::msg::DetectionRes
     if (msg->labels[i] == "red pylon" && i < msg->boxes.size()) {
       found_red_pylon = true;
 
-      // バウンディングボックスの面積を計算（Polygonから）
+      // バウンディングボックスの面積を計算
       const auto& box = msg->boxes[i];
-      if (box.points.size() >= 2) {
-        // 矩形の場合: 对角頂点から幅と高さを計算
-        double min_x = static_cast<double>(box.points[0].x);
-        double max_x = static_cast<double>(box.points[0].x);
-        double min_y = static_cast<double>(box.points[0].y);
-        double max_y = static_cast<double>(box.points[0].y);
-
-        for (const auto& point : box.points) {
-          min_x = std::min(min_x, static_cast<double>(point.x));
-          max_x = std::max(max_x, static_cast<double>(point.x));
-          min_y = std::min(min_y, static_cast<double>(point.y));
-          max_y = std::max(max_y, static_cast<double>(point.y));
-        }
-
-        double width = max_x - min_x;
-        double height = max_y - min_y;
+      if (box.points.size() >= 4) {
+        // 簡素化: 最初と3番目の点から幅と高さを直接計算
+        double width = std::abs(box.points[2].x - box.points[0].x);
+        double height = std::abs(box.points[2].y - box.points[0].y);
         double area = width * height;
-
         max_area = std::max(max_area, area);
-
-        // RCLCPP_INFO(this->get_logger(), "red pylonバウンディングボックス面積: %.1f (%.1fx%.1f)", area, width, height);
       }
     }
   }
@@ -271,35 +277,79 @@ bool LaneFollowingNode::checkRedPylonStop(const lang_sam_msgs::msg::DetectionRes
     pylon_area_pub_->publish(area_msg);
   }
 
-  bool should_stop = found_red_pylon && (max_area >= red_pylon_stop_threshold_);
-
-  if (found_red_pylon) {
-    if (should_stop) {
-      RCLCPP_WARN(this->get_logger(), "❄️ 停止 - red pylon面積: %.1f >= しきい値: %.1f",
-                  max_area, red_pylon_stop_threshold_);
-    } else {
-      RCLCPP_INFO(this->get_logger(), "✅ 直進 - red pylon面積: %.1f < しきい値: %.1f",
-                  max_area, red_pylon_stop_threshold_);
-    }
+  // しきい値を超えた場合に永続停止を設定
+  if (found_red_pylon && max_area >= red_pylon_stop_threshold_) {
+    permanent_stop_ = true;
+    RCLCPP_WARN(this->get_logger(), "🛑 永続停止開始 - red pylon面積: %.1f >= しきい値: %.1f",
+                max_area, red_pylon_stop_threshold_);
+    return true;
   }
 
-  return should_stop;
+  return false;
 }
 
 std::vector<cv::Vec4f> LaneFollowingNode::detectLinesWithHough(const cv::Mat& mask)
 {
   std::vector<cv::Vec4f> result_lines;
   std::vector<cv::Vec4i> lines;
+  cv::Mat processed_mask;
+
+  // 細線化処理の有効/無効を判定
+  if (enable_thinning_) {
+    // スケルトン化（細線化）の実装
+    cv::Mat skel = cv::Mat::zeros(mask.size(), CV_8UC1);
+    cv::Mat temp;
+    cv::Mat element = cv::getStructuringElement(cv::MORPH_CROSS, cv::Size(3, 3));
+
+    // 入力マスクをコピー
+    mask.copyTo(temp);
+
+    // モルフォロジー演算による細線化
+    bool done = false;
+    int max_iterations = 100;  // 無限ループ防止
+    int iteration = 0;
+
+    while (!done && iteration < max_iterations) {
+      cv::Mat eroded;
+      cv::Mat opened;
+
+      // エロージョン
+      cv::erode(temp, eroded, element);
+
+      // オープニング
+      cv::dilate(eroded, opened, element);
+
+      // 差分を計算
+      cv::Mat diff = temp - opened;
+
+      // スケルトンに追加
+      cv::bitwise_or(skel, diff, skel);
+
+      // 次のイテレーション用に準備
+      eroded.copyTo(temp);
+
+      // 終了条件：すべてのピクセルが0になったら終了
+      if (cv::countNonZero(temp) == 0) {
+        done = true;
+      }
+
+      iteration++;
+    }
+
+    processed_mask = skel;
+  } else {
+    // 細線化を行わない場合は元のマスクをそのまま使用
+    processed_mask = mask;
+  }
 
   // ハフ変換で直線検出
-  cv::HoughLinesP(mask, lines, 1, CV_PI/180, 50, 50, 10);
+  cv::HoughLinesP(processed_mask, lines, 1, CV_PI/180, 50, 50, 10);
 
   // Vec4iからVec4fへ変換
   for (const auto& line : lines) {
     result_lines.push_back(cv::Vec4f(line[0], line[1], line[2], line[3]));
   }
 
-  // RCLCPP_INFO(this->get_logger(), "ハフ変換検出線数: %zu", result_lines.size());
   return result_lines;
 }
 
@@ -350,18 +400,83 @@ std::tuple<cv::Vec4f, cv::Vec4f, int, int> LaneFollowingNode::classifyLeftRightL
     }
   }
 
-  // RCLCPP_INFO(this->get_logger(), "左線インデックス: %d, 右線インデックス: %d", left_idx, right_idx);
+  // 傾きスムージング処理
+  if (left_idx != -1) {
+    left_line = applySlopeSmoothing(left_line, true);  // 左線
+  }
+  if (right_idx != -1) {
+    right_line = applySlopeSmoothing(right_line, false);  // 右線
+  }
 
   return {left_line, right_line, left_idx, right_idx};
 }
 
+cv::Vec4f LaneFollowingNode::applySlopeSmoothing(const cv::Vec4f& line, bool is_left_line)
+{
+  // 線の傾きを計算
+  double dx = line[2] - line[0];
+  double dy = line[3] - line[1];
+
+  // ゼロ除算回避
+  if (std::abs(dx) < 1e-6) {
+    dx = 1e-6;
+  }
+
+  double current_slope = dy / dx;
+
+  // 前回の傾きを取得
+  double& last_slope = is_left_line ? last_left_slope_ : last_right_slope_;
+
+  // 初回の場合は現在の傾きをそのまま使用
+  if (!has_valid_slopes_) {
+    last_slope = current_slope;
+    has_valid_slopes_ = true;
+    return line;
+  }
+
+  // 傾きの変化量をチェック
+  double slope_change = std::abs(current_slope - last_slope);
+
+  // 極端な変化を制限
+  if (slope_change > max_slope_change_) {
+    // 変化量を制限
+    double sign = (current_slope > last_slope) ? 1.0 : -1.0;
+    current_slope = last_slope + sign * max_slope_change_;
+  }
+
+  // スムージング適用
+  double smoothed_slope = last_slope * slope_smoothing_factor_ +
+                         current_slope * (1.0 - slope_smoothing_factor_);
+
+  // 更新
+  last_slope = smoothed_slope;
+
+  // スムージングされた傾きで線を再構築
+  // 線の中点を維持
+  double mid_x = (line[0] + line[2]) / 2.0;
+  double mid_y = (line[1] + line[3]) / 2.0;
+
+  // 線の長さを維持
+  double length = std::sqrt(dx * dx + dy * dy);
+  double half_length = length / 2.0;
+
+  // 新しいdx, dyを計算
+  double new_dx = half_length / std::sqrt(1.0 + smoothed_slope * smoothed_slope);
+  double new_dy = smoothed_slope * new_dx;
+
+  // 新しい線の端点を計算
+  cv::Vec4f smoothed_line(
+    static_cast<float>(mid_x - new_dx),
+    static_cast<float>(mid_y - new_dy),
+    static_cast<float>(mid_x + new_dx),
+    static_cast<float>(mid_y + new_dy)
+  );
+
+  return smoothed_line;
+}
+
 cv::Point2f LaneFollowingNode::calculateIntersection(const cv::Vec4f& left_line, const cv::Vec4f& right_line)
 {
-  // RCLCPP_INFO(this->get_logger(), "交点計算開始");
-  // RCLCPP_INFO(this->get_logger(), "左線: (%.1f,%.1f)-(%.1f,%.1f)",
-  //             left_line[0], left_line[1], left_line[2], left_line[3]);
-  // RCLCPP_INFO(this->get_logger(), "右線: (%.1f,%.1f)-(%.1f,%.1f)",
-  //             right_line[0], right_line[1], right_line[2], right_line[3]);
 
   // HoughLinesP の結果: (x1, y1, x2, y2)
   if (left_line[0] == 0 && left_line[1] == 0 && left_line[2] == 0 && left_line[3] == 0) {
@@ -400,12 +515,20 @@ cv::Point2f LaneFollowingNode::calculateIntersection(const cv::Vec4f& left_line,
 
 void LaneFollowingNode::publishControl(bool should_stop)
 {
+  auto cmd_vel = geometry_msgs::msg::Twist();
+
+  // 永続停止状態または一時停止の場合は速度を0に固定
+  if (permanent_stop_ || should_stop) {
+    cmd_vel.linear.x = 0.0;
+    cmd_vel.angular.z = 0.0;
+    cmd_vel_pub_->publish(cmd_vel);
+    return;
+  }
+
+  // 有効な線がある場合のみ制御計算を実行
   if (has_valid_lines_) {
     double angular_velocity = calculateControl(last_intersection_);
-
-    auto cmd_vel = geometry_msgs::msg::Twist();
-    // red pylon検出時は停止，そうでなければ通常速度
-    cmd_vel.linear.x = should_stop ? 0.0 : linear_velocity_;
+    cmd_vel.linear.x = linear_velocity_;
     cmd_vel.angular.z = angular_velocity;
     cmd_vel_pub_->publish(cmd_vel);
 

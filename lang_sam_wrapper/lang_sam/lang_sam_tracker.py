@@ -16,8 +16,8 @@ from .models import GroundingDINO, SAM2
 
 class OpticalFlowTracker:
     """特徴点ベースOptical Flowトラッカー"""
-    
-    def __init__(self, 
+
+    def __init__(self,
                  max_corners: int = 100,
                  quality_level: float = 0.01,
                  min_distance: int = 10,
@@ -25,7 +25,11 @@ class OpticalFlowTracker:
                  win_size: Tuple[int, int] = (15, 15),
                  max_level: int = 2,
                  max_disappeared: int = 30,
-                 min_tracked_points: int = 5):
+                 min_tracked_points: int = 5,
+                 enable_adaptive_bbox: bool = True,
+                 bbox_scale_factor: float = 0.02,
+                 min_bbox_scale: float = 1.0,
+                 max_bbox_scale: float = 1.5):
         """
         初期化
         Args:
@@ -37,6 +41,10 @@ class OpticalFlowTracker:
             max_level: ピラミッドレベル数
             max_disappeared: トラック削除までの最大未検出フレーム数
             min_tracked_points: トラック維持に必要な最小特徴点数
+            enable_adaptive_bbox: 適応的BBOXリサイズの有効/無効
+            bbox_scale_factor: 分散に対するスケーリング係数
+            min_bbox_scale: 最小スケール倍率
+            max_bbox_scale: 最大スケール倍率
         """
         # 特徴点抽出パラメータ（goodFeaturesToTrack用）
         # 目的: 安定した特徴点を抽出する目的でパラメータを設定
@@ -57,9 +65,15 @@ class OpticalFlowTracker:
         
         # トラッカー管理パラメータ
         self.next_id = 1
-        self.tracks: Dict[int, Dict] = {}  # {track_id: {"points": np.array, "bbox": [x1,y1,x2,y2], "label": str, "disappeared": int}}
+        self.tracks: Dict[int, Dict] = {}  # {track_id: {"points": np.array, "bbox": [x1,y1,x2,y2], "label": str, "disappeared": int, "prev_std": float}}
         self.max_disappeared = max_disappeared
         self.min_tracked_points = min_tracked_points
+
+        # 適応的BBOXリサイズパラメータ
+        self.enable_adaptive_bbox = enable_adaptive_bbox
+        self.bbox_scale_factor = bbox_scale_factor
+        self.min_bbox_scale = min_bbox_scale
+        self.max_bbox_scale = max_bbox_scale
         
         # 前フレーム保存用（グレースケール）
         self.prev_gray: Optional[np.ndarray] = None
@@ -150,11 +164,14 @@ class OpticalFlowTracker:
                 
                 # 新しいトラックを登録
                 track_id = self.next_id
+                # 初期分散を計算
+                initial_std = np.std(corners.reshape(-1, 2), axis=0).mean() if len(corners) > 1 else 0.0
                 self.tracks[track_id] = {
                     "points": corners,
                     "bbox": bbox.tolist(),
                     "label": labels[i] if labels and i < len(labels) else "unknown",
-                    "disappeared": 0
+                    "disappeared": 0,
+                    "prev_std": initial_std
                 }
                 self.next_id += 1
                 print(f"[OpticalFlowTracker] 新規トラック{track_id}を登録: {len(corners)}個の特徴点, corners.shape={corners.shape}")
@@ -239,16 +256,63 @@ class OpticalFlowTracker:
                     max_movement = 100.0  # 最大移動ピクセル数
                     if abs(dx) > max_movement or abs(dy) > max_movement:
                         dx, dy = 0.0, 0.0
-                    
+
                     # BBOXを更新
                     old_bbox = track["bbox"]
-                    new_bbox = [
-                        old_bbox[0] + dx,
-                        old_bbox[1] + dy,
-                        old_bbox[2] + dx,
-                        old_bbox[3] + dy
-                    ]
-                    
+
+                    # 適応的BBOXリサイズ（分散変化に基づく拡大のみ）
+                    if self.enable_adaptive_bbox and len(good_new_2d) > 2:
+                        # 現在フレームの特徴点分散を計算
+                        points_std = np.std(good_new_2d, axis=0)  # x,y方向の標準偏差
+                        current_std = points_std.mean()
+
+                        # 前フレームの分散を取得
+                        prev_std = track.get("prev_std", current_std)
+
+                        # 分散の増加量を計算（増加した場合のみ拡大）
+                        std_increase = current_std - prev_std
+
+                        # 分散が大幅に増加した場合のみBBOXを拡大
+                        if std_increase > 3.0:  # 閾値以上の増加時のみ拡大
+                            scale_factor = 1.1  # 固定で1.1倍に拡大
+
+                            # BBOXの中心を計算
+                            center_x = (old_bbox[0] + old_bbox[2]) / 2 + dx
+                            center_y = (old_bbox[1] + old_bbox[3]) / 2 + dy
+
+                            # 新しいサイズを計算
+                            width = (old_bbox[2] - old_bbox[0]) * scale_factor
+                            height = (old_bbox[3] - old_bbox[1]) * scale_factor
+
+                            # 新しいBBOXを設定（中心を維持しながら拡大）
+                            new_bbox = [
+                                center_x - width / 2,
+                                center_y - height / 2,
+                                center_x + width / 2,
+                                center_y + height / 2
+                            ]
+
+                            print(f"[OpticalFlowTracker] BBOX拡大: 分散増加={std_increase:.1f} (前回={prev_std:.1f}→今回={current_std:.1f})")
+                        else:
+                            # 分散が増加していない場合は平行移動のみ（サイズ維持）
+                            new_bbox = [
+                                old_bbox[0] + dx,
+                                old_bbox[1] + dy,
+                                old_bbox[2] + dx,
+                                old_bbox[3] + dy
+                            ]
+
+                        # 今回の分散を次回のために保存
+                        track["prev_std"] = current_std
+                    else:
+                        # 適応的リサイズが無効、または特徴点が少ない場合は平行移動のみ
+                        new_bbox = [
+                            old_bbox[0] + dx,
+                            old_bbox[1] + dy,
+                            old_bbox[2] + dx,
+                            old_bbox[3] + dy
+                        ]
+
                     # 画像境界内にクリップ（高速化）
                     h, w = gray.shape
                     new_bbox[0] = np.clip(new_bbox[0], 0, w-1)
@@ -359,11 +423,14 @@ class OpticalFlowTracker:
             corners[:, 0, 1] += y1
             
             track_id = self.next_id
+            # 初期分散を計算
+            initial_std = np.std(corners.reshape(-1, 2), axis=0).mean() if len(corners) > 1 else 0.0
             self.tracks[track_id] = {
                 "points": corners,
                 "bbox": bbox.tolist(),
                 "label": label,
-                "disappeared": 0
+                "disappeared": 0,
+                "prev_std": initial_std
             }
             self.next_id += 1
     
@@ -528,7 +595,12 @@ class LangSamTracker:
                  optical_flow_win_size: Tuple[int, int] = (15, 15),
                  optical_flow_max_level: int = 2,
                  optical_flow_max_disappeared: int = 30,
-                 optical_flow_min_tracked_points: int = 5):
+                 optical_flow_min_tracked_points: int = 5,
+                 # 適応的BBOXパラメータ
+                 enable_adaptive_bbox: bool = True,
+                 bbox_scale_factor: float = 0.02,
+                 min_bbox_scale: float = 1.0,
+                 max_bbox_scale: float = 1.5):
         """初期化（OpticalFlow Tracker版）"""
         # GroundingDINO初期化
         # 目的: ゼロショット物体検出を実現する目的で使用
@@ -550,7 +622,11 @@ class LangSamTracker:
             win_size=optical_flow_win_size,
             max_level=optical_flow_max_level,
             max_disappeared=optical_flow_max_disappeared,
-            min_tracked_points=optical_flow_min_tracked_points
+            min_tracked_points=optical_flow_min_tracked_points,
+            enable_adaptive_bbox=enable_adaptive_bbox,
+            bbox_scale_factor=bbox_scale_factor,
+            min_bbox_scale=min_bbox_scale,
+            max_bbox_scale=max_bbox_scale
         )
         
         # 最適化: メモリ事前確保

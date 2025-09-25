@@ -69,7 +69,12 @@ class LangSAMTrackerNode(Node):
             optical_flow_win_size=(self.optical_flow_win_size_x, self.optical_flow_win_size_y),
             optical_flow_max_level=self.optical_flow_max_level,
             optical_flow_max_disappeared=self.optical_flow_max_disappeared,
-            optical_flow_min_tracked_points=self.optical_flow_min_tracked_points
+            optical_flow_min_tracked_points=self.optical_flow_min_tracked_points,
+            # 適応的BBOXパラメータを設定ファイルから渡す
+            enable_adaptive_bbox=self.enable_adaptive_bbox,
+            bbox_scale_factor=self.bbox_scale_factor,
+            min_bbox_scale=self.min_bbox_scale,
+            max_bbox_scale=self.max_bbox_scale
         )
         
         # タイミング制御（正確な初期化）
@@ -121,6 +126,12 @@ class LangSAMTrackerNode(Node):
         self.declare_parameter('optical_flow_max_level', 2)
         self.declare_parameter('optical_flow_max_disappeared', 30)
         self.declare_parameter('optical_flow_min_tracked_points', 5)
+
+        # 適応的BBOXパラメータ
+        self.declare_parameter('enable_adaptive_bbox', True)
+        self.declare_parameter('bbox_scale_factor', 0.02)
+        self.declare_parameter('min_bbox_scale', 1.0)
+        self.declare_parameter('max_bbox_scale', 1.5)
         
         # トピックパラメータ  
         self.declare_parameter('input_topic', '/zed/zed_node/rgb/image_rect_color')
@@ -156,14 +167,29 @@ class LangSAMTrackerNode(Node):
             'optical_flow_max_disappeared': 30,
             'optical_flow_min_tracked_points': 5
         }
-        
+
         for key, default in optical_params.items():
+            setattr(self, key, self.get_parameter(key).value)
+
+        # 適応的BBOXパラメータ読み込み
+        adaptive_bbox_params = {
+            'enable_adaptive_bbox': True,
+            'bbox_scale_factor': 0.02,
+            'min_bbox_scale': 1.0,
+            'max_bbox_scale': 1.5
+        }
+
+        for key, default in adaptive_bbox_params.items():
             setattr(self, key, self.get_parameter(key).value)
         
         # OpticalFlowパラメータ情報をログ出力
         # 目的: OpticalFlowトラッキングパラメータを確認可能にする目的で使用
         self.logger.info(f"OpticalFlow設定: max_corners={self.optical_flow_max_corners}, quality_level={self.optical_flow_quality_level}")
-        
+
+        # 適応的BBOXパラメータ情報をログ出力
+        self.logger.info(f"適応的BBOX設定: 有効={self.enable_adaptive_bbox}, scale_factor={self.bbox_scale_factor}")
+        self.logger.info(f"BBOXスケール範囲: {self.min_bbox_scale} - {self.max_bbox_scale}")
+
         # GDINO実行間隔の確認
         self.logger.info(f"GDINO実行間隔: {self.gdino_interval_seconds}秒")
         self.logger.info(f"SAM2実行間隔: {self.sam2_interval_seconds}秒")

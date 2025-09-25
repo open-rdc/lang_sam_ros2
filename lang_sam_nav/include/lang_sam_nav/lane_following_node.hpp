@@ -32,6 +32,7 @@ private:
   cv::Mat combine_masks(const std::vector<cv::Mat>& masks);
   std::vector<cv::Vec4f> detectLinesWithHough(const cv::Mat& mask);
   std::tuple<cv::Vec4f, cv::Vec4f, int, int> classifyLeftRightLines(const std::vector<cv::Vec4f>& lines);
+  cv::Vec4f applySlopeSmoothing(const cv::Vec4f& line, bool is_left_line);
   cv::Vec4f extendLineWithFitting(const cv::Vec4f& line);
   cv::Point2f calculateIntersection(const cv::Vec4f& left_line, const cv::Vec4f& right_line);
   double calculateControl(const cv::Point2f& intersection);
@@ -61,6 +62,7 @@ private:
   int line_thickness_;
   int circle_radius_;
   double red_pylon_stop_threshold_;  // red pylon停止しきい値（バウンディングボックス面積）
+  bool enable_thinning_;  // 細線化処理の有効/無効
 
   // 状態変数
   cv::Mat latest_original_image_;
@@ -70,6 +72,16 @@ private:
   bool has_valid_lines_;
   int image_width_;
   int image_height_;
+
+  // 傾きスムージング用変数
+  double last_left_slope_;
+  double last_right_slope_;
+  bool has_valid_slopes_;
+  double slope_smoothing_factor_;  // スムージング係数
+  double max_slope_change_;       // 最大傾き変化量
+
+  // red pylon永続停止状態
+  bool permanent_stop_;           // 永続停止フラグ
 
   // PID制御用状態変数
   double error_integral_;
