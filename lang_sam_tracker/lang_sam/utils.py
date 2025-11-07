@@ -10,42 +10,25 @@ def load_image(image_path: str):
     return Image.open(image_path).convert("RGB")
 
 
-def draw_image(image_rgb, masks, xyxy, probs, labels, track_ids=None):
-    """
-    統合画像描画関数（track_id対応版）
-    
-    目的: BBOX、ラベル、マスク、track_idを統合的に描画する目的で使用
-    """
+def draw_image(image_rgb, masks, xyxy, probs, labels):
     box_annotator = sv.BoxCornerAnnotator()
     label_annotator = sv.LabelAnnotator()
     mask_annotator = sv.MaskAnnotator()
-    
     # Create class_id for each unique label
-    unique_labels = list(set(labels)) if labels else []
+    unique_labels = list(set(labels))
     class_id_map = {label: idx for idx, label in enumerate(unique_labels)}
-    class_id = [class_id_map[label] for label in labels] if labels else []
-    
-    # track_id付きラベル作成
-    # 目的: Centroidトラッキング結果を視覚的に確認する目的で使用
-    final_labels = []
-    if track_ids and len(track_ids) > 0:
-        for i, label in enumerate(labels):
-            tid = int(track_ids[i]) if i < len(track_ids) else -1
-            final_labels.append(f"{label} ID:{tid}")
-    else:
-        final_labels = labels if labels else []
+    class_id = [class_id_map[label] for label in labels]
 
     # Add class_id to the Detections object
     detections = sv.Detections(
         xyxy=xyxy,
-        mask=masks.astype(bool) if masks is not None and len(masks) > 0 else None,
+        mask=masks.astype(bool),
         confidence=probs,
-        class_id=np.array(class_id) if class_id else None,
+        class_id=np.array(class_id),
     )
     annotated_image = box_annotator.annotate(scene=image_rgb.copy(), detections=detections)
-    annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=final_labels)
-    if masks is not None and len(masks) > 0:
-        annotated_image = mask_annotator.annotate(scene=annotated_image, detections=detections)
+    annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
+    annotated_image = mask_annotator.annotate(scene=annotated_image, detections=detections)
     return annotated_image
 
 

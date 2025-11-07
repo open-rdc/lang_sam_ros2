@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(lang_sam_wrapper)
+project(lang_sam_tracker)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -16,8 +16,7 @@ ament_python_install_package(lang_sam)
 
 # Install Python scripts as executables
 install(PROGRAMS
-  lang_sam_wrapper/debug_lang_segment_anything.py
-  lang_sam_wrapper/lang_sam_tracker_node.py
+  lang_sam_tracker/lang_sam_tracker_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
