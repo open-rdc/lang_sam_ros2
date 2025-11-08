@@ -1,11 +1,11 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>lang_sam_wrapper</name>
+  <name>lang_sam_tracker</name>
   <version>0.0.1</version>
-  <description>LangSAM wrapper for ROS2</description>
+  <description>A package that adds tracking to LangSAM</description>
   <maintainer email="babaryusei.kw@gmail.com">Ryusei Baba</maintainer>
-  <license>Apache-2.0</license>
+  <license>Apache 2.0</license>
 
   <!-- ビルドツール依存 -->
   <buildtool_depend>ament_cmake</buildtool_depend>
@@ -17,8 +17,6 @@
   <build_depend>libopencv-dev</build_depend>
   <build_depend>libopencv-contrib-dev</build_depend>
   <build_depend>python3-dev</build_depend>
-  <build_depend>pybind11_vendor</build_depend>
-  <build_depend>pybind11-dev</build_depend>
   
   <!-- 実行時に必要な依存 -->
   <exec_depend>rclpy</exec_depend>
@@ -26,7 +24,6 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>libopencv-contrib-dev</exec_depend>
-  <exec_depend>lang_sam_msgs</exec_depend>
   
   <!-- AI/ML依存パッケージ -->
   <exec_depend>python3-torch</exec_depend>
