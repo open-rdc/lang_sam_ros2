@@ -1,7 +1,7 @@
 lang_sam_tracker:
   ros__parameters:
     sam_model: sam2.1_hiera_small
-    text_prompt: white line. road.
+    text_prompt: white line. road. car. traffic cone.
     box_threshold: 0.3
     text_threshold: 0.25
     detection_interval_sec: 2.0
