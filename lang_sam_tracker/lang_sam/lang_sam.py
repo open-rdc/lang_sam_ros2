@@ -70,7 +70,7 @@ class LangSAM:
                         "mask_scores": score,
                     }
                 )
-            print(f"Predicted {len(all_results)} masks")
+            # print(f"Predicted {len(all_results)} masks")
         return all_results
 
 
