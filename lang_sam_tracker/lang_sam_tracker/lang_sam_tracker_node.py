@@ -31,7 +31,7 @@ class LangSamTrackerNode(Node):
 
         # ROS 2のサブスクライバとパブリッシャの設定
         self.image_sub = self.create_subscription(ROSImage, '/camera/image_raw', self.image_callback, 1)
-        self.image_pub = self.create_publisher(ROSImage, '/lang_sam_output', 1)
+        self.image_inference_pub = self.create_publisher(ROSImage, '/image/lang_sam', 1)
 
         # ログの設定
         self.get_logger().info(f'Using device: {self.device}')
@@ -78,8 +78,7 @@ class LangSamTrackerNode(Node):
         result_msg = self.bridge.cv2_to_imgmsg(result_cv_image, encoding='bgr8')
 
         # 結果のパブリッシュ
-        self.image_pub.publish(result_msg)
-        # self.get_logger().info('Published processed image.')
+        self.image_inference_pub.publish(result_msg)
 
     
 
