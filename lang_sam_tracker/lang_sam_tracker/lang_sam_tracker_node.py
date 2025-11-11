@@ -67,11 +67,37 @@ class LangSamTrackerNode(Node):
         self.declare_parameter('text_threshold', 0.25)
         self.declare_parameter('detection_interval_sec', 2.0)
 
+        # KLT(LK光学フロー)のROSパラメータ
+        # - 窓サイズ、ピラミッド段数、収束条件、最低存続点数
+        self.declare_parameter('klt_win_size', [15, 15])      # integer_array [w, h]
+        self.declare_parameter('klt_max_level', 3)            # integer
+        self.declare_parameter('klt_criteria_count', 30)      # integer
+        self.declare_parameter('klt_criteria_eps', 0.03)      # double
+        self.declare_parameter('klt_min_points', 5)           # integer: 維持すべき最小追跡点数
+
+        # GFTT(Shi-Tomasi)のROSパラメータ
+        self.declare_parameter('gftt_max_corners', 120)       # integer
+        self.declare_parameter('gftt_quality_level', 0.01)    # double
+        self.declare_parameter('gftt_min_distance', 3.0)      # double(画素)
+
         self.sam_model = self.get_parameter('sam_model').get_parameter_value().string_value
         self.text_prompt = self.get_parameter('text_prompt').get_parameter_value().string_value
         self.box_threshold = self.get_parameter('box_threshold').get_parameter_value().double_value
         self.text_threshold = self.get_parameter('text_threshold').get_parameter_value().double_value
         self.detection_interval_sec = self.get_parameter('detection_interval_sec').get_parameter_value().double_value
+
+        # KLTパラメータの取得と整形
+        ws = self.get_parameter('klt_win_size').get_parameter_value().integer_array_value
+        self.klt_win_size = (int(ws[0]), int(ws[1])) if len(ws) >= 2 else (15, 15)
+        self.klt_max_level = int(self.get_parameter('klt_max_level').get_parameter_value().integer_value)
+        self.klt_criteria_count = int(self.get_parameter('klt_criteria_count').get_parameter_value().integer_value)
+        self.klt_criteria_eps = float(self.get_parameter('klt_criteria_eps').get_parameter_value().double_value)
+        self.klt_min_points = int(self.get_parameter('klt_min_points').get_parameter_value().integer_value)
+
+        # GFTTパラメータの取得
+        self.gftt_max_corners = int(self.get_parameter('gftt_max_corners').get_parameter_value().integer_value)
+        self.gftt_quality_level = float(self.get_parameter('gftt_quality_level').get_parameter_value().double_value)
+        self.gftt_min_distance = float(self.get_parameter('gftt_min_distance').get_parameter_value().double_value)
 
     def _init_tracks_from_detections(self, cv_image, boxes, labels, scores, masks_bool):
         # 検出結果からトラック群を初期化
@@ -89,17 +115,16 @@ class LangSamTrackerNode(Node):
                 continue
             mask_uint8 = (masks_bool[i].astype(np.uint8)) * 255  # goodFeaturesToTrackがuint8マスクを要求
 
-            # Shi-Tomasiコーナーをマスク内から抽出（KLT初期特徴点）
-            # maxCorners/qualityLevel/minDistanceは対象サイズや速度に応じて調整可能
+            # GFTTパラメータをROSから取得した値で適用
             pts = cv2.goodFeaturesToTrack(
                 image=gray,
-                maxCorners=120,
-                qualityLevel=0.01,
-                minDistance=3,
+                maxCorners=self.gftt_max_corners,
+                qualityLevel=self.gftt_quality_level,
+                minDistance=self.gftt_min_distance,
                 mask=mask_uint8
             )
-            # 特徴点が少なすぎるとKLTのドリフト/破綻が起きやすいので破棄
-            if pts is None or pts.shape[0] < 5:
+            # 最低点数をROSパラメータで判定
+            if pts is None or pts.shape[0] < self.klt_min_points:
                 continue
 
             track = {
@@ -131,11 +156,13 @@ class LangSamTrackerNode(Node):
             return
         gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
         new_tracks = []
-        # KLTパラメータ: 探索窓(winSize), ピラミッド段数(maxLevel), 収束条件(criteria)
+        # KLTパラメータをROSから取得した値で適用
         lk_params = dict(
-            winSize=(15, 15),
-            maxLevel=3,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.03)
+            winSize=tuple(map(int, self.klt_win_size)),
+            maxLevel=int(self.klt_max_level),
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                      int(self.klt_criteria_count),
+                      float(self.klt_criteria_eps))
         )
         h, w = gray.shape
         for track in self.tracks:
@@ -144,11 +171,11 @@ class LangSamTrackerNode(Node):
             if new_pts is None or st is None:
                 continue
 
-            # 追跡成功点のみ抽出し、以降の計算を安定化
+            # 追跡成功点のみ抽出
             st_flat = st.flatten().astype(bool)
             good = new_pts[st_flat]
 
-            # OpenCVの返却形状差を吸収して(N,2)へ正規化（防御的キャスト）
+            # 形状を(N,2)に正規化
             if good.ndim == 3 and good.shape[1] == 1 and good.shape[2] == 2:
                 good_xy = good[:, 0, :]
             elif good.ndim == 2 and good.shape[1] == 2:
@@ -159,8 +186,8 @@ class LangSamTrackerNode(Node):
                 except Exception:
                     continue
 
-            # 点が少ない場合はドリフト/破綻しやすいので破棄
-            if good_xy.shape[0] < 5:
+            # 最低点数をROSパラメータで判定
+            if good_xy.shape[0] < self.klt_min_points:
                 continue
 
             # bboxは特徴点のmin/maxから更新（画像境界でクリップ）
@@ -303,11 +330,16 @@ class LangSamTrackerNode(Node):
         self.image_tracking_pub.publish(track_msg)
 
 
-def main():
-    rclpy.init()
+def main(args=None):
+    rclpy.init(args=args)
     node = LangSamTrackerNode()
-    rclpy.spin(node)
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
