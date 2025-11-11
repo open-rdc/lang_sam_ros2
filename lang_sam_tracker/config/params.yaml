@@ -4,3 +4,4 @@ lang_sam_tracker:
     text_prompt: white line. road.
     box_threshold: 0.3
     text_threshold: 0.25
+    detection_interval_sec: 2.0
