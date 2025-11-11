@@ -1,13 +1,12 @@
 ### lang_sam_ros2
 
-本パッケージは，**Language Segment-Anything** を ROS 2 で使用できるようにしたものです．
+本手法は，Language Segment-Anything にKLTトラッカー（Kanade-Lucas-Tomasi Feature Tracker）を導入することで，ゼロショットで高速なトラッキングを実現します．ROS 2環境での利用に対応しています．
+
+[[Paper](doc/si2025_main1.pdf)]
 
 ---
 #### 概要（後日修正予定）
-**Language Segment-Anything** と **CSRT（Channel and Spatial Reliability Tracking）** を統合することで， 
-<strong>ゼロショットで高精度なオブジェクトトラッキング</strong> を実現しています．
-
-下図左は LangSAM のマスク出力，右はそのマスクをCSRTでトラッキングした結果です．
+下図左は LangSAM の出力，右はそのマスクをKLTトラッカーでトラッキングした出力です．
 
 <div align="center">
   <table>
@@ -16,8 +15,8 @@
       <td><img src="./doc/optical_flow.gif" alt="Optical Flow 出力" height="200"></td>
     </tr>
     <tr>
-      <td align="center"><b>LangSAM 出力<br>text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."</b></td>
-      <td align="center"><b>CSRTによる追跡<br>tracking_targets: "white line. human. red pylon. car. mobility."</b></td>
+      <td align="center"><b>LangSAMによる検出<br>text_prompt: "white line. human. red pylon. wall. car. building. mobility. road."</b></td>
+      <td align="center"><b>KLTトラッカーによる追跡<br>tracking_targets: "white line. human. red pylon. car. mobility."</b></td>
     </tr>
   </table>
 </div>

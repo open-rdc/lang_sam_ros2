@@ -61,7 +61,7 @@ class LangSAM:
 
             all_results.append(processed_result)
         if sam_images:
-            print(f"Predicting {len(sam_boxes)} masks")
+            # print(f"Predicting {len(sam_boxes)} masks")
             masks, mask_scores, _ = self.sam.predict_batch(sam_images, xyxy=sam_boxes)
             for idx, mask, score in zip(sam_indices, masks, mask_scores):
                 all_results[idx].update(
@@ -70,7 +70,7 @@ class LangSAM:
                         "mask_scores": score,
                     }
                 )
-            print(f"Predicted {len(all_results)} masks")
+            # print(f"Predicted {len(all_results)} masks")
         return all_results
 
 
