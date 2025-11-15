@@ -20,20 +20,6 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install launch files
-install(DIRECTORY
-  launch/
-  DESTINATION share/${PROJECT_NAME}/launch
-  FILES_MATCHING PATTERN "*.launch.py"
-)
-
-# Install config files
-install(DIRECTORY
-  config/
-  DESTINATION share/${PROJECT_NAME}/config
-  FILES_MATCHING PATTERN "*.yaml"
-)
-
 # Testing
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

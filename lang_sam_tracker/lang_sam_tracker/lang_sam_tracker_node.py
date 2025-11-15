@@ -14,6 +14,7 @@ import cv2
 from lang_sam import LangSAM
 from lang_sam.utils import draw_image  # 可視化ユーティリティ
 from lang_sam.models.utils import DEVICE  # 推論デバイス（cuda/cpu取得）
+from lang_sam_msgs.msg import TrackArray, Track # カスタムメッセージ
 
 class LangSamTrackerNode(Node):
     def __init__(self):
@@ -50,6 +51,7 @@ class LangSamTrackerNode(Node):
         self.image_sub = self.create_subscription(ROSImage, '/camera/image_raw', self.image_callback, 1)
         self.image_detection_pub = self.create_publisher(ROSImage, '/image/lang_sam/detection', 1)
         self.image_tracking_pub = self.create_publisher(ROSImage, '/image/lang_sam/tracking', 1)
+        self.tracks_pub = self.create_publisher(TrackArray, '/lang_sam/tracks', 10)
 
         # ログ
         self.get_logger().info(f'Using device: {self.device}')
@@ -296,8 +298,8 @@ class LangSamTrackerNode(Node):
 
         # 毎フレーム、トラッキング結果を/trackingに可視化・配信
         if self.tracks:
-            # numpy配列に正規化（draw_imageはnp.ndarray想定）
-            boxes_for_draw = np.asarray([t['box'] for t in self.tracks], dtype=np.int32)       # (N,4)
+            # numpy配列に正規化
+            boxes_for_draw = np.asarray([t['box'] for t in self.tracks], dtype=np.int32)
             labels_for_draw = [t['label'] for t in self.tracks]                                 # list[str]
             scores_for_draw = np.asarray([t['score'] for t in self.tracks], dtype=np.float32)   # (N,)
             masks_for_draw = np.asarray([t['mask'] for t in self.tracks], dtype=bool)           # (N,H,W)
@@ -328,6 +330,21 @@ class LangSamTrackerNode(Node):
         track_image_cv = cv2.cvtColor(np.array(track_image_pil), cv2.COLOR_RGB2BGR)
         track_msg = self.bridge.cv2_to_imgmsg(track_image_cv, encoding='bgr8')
         self.image_tracking_pub.publish(track_msg)
+
+        # トラック情報を/custom_msgs/TrackArrayで配信
+        msg_tracks = TrackArray()
+        msg_tracks.header.stamp = self.get_clock().now().to_msg()
+        msg_tracks.header.frame_id = 'camera'
+        for t in self.tracks:
+            tr = Track()
+            tr.id = int(t['id'])
+            tr.label = str(t['label'])
+            tr.score = float(t['score'])
+            x1, y1, x2, y2 = t['box']
+            tr.x_min = int(x1); tr.y_min = int(y1)
+            tr.x_max = int(x2); tr.y_max = int(y2)
+            msg_tracks.tracks.append(tr)
+        self.tracks_pub.publish(msg_tracks)
 
 
 def main(args=None):
