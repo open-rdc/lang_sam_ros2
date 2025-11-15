@@ -2,7 +2,7 @@ lang_sam_tracker:
   ros__parameters:
     # LangSAM
     sam_model: sam2.1_hiera_small
-    text_prompt: "white line. road. car. traffic cone."
+    text_prompt: "person."
     box_threshold: 0.3            # 検出(BBox)の信頼度閾値。↑で厳格、↓で検出増(誤検出も増)
     text_threshold: 0.25          # テキスト一致の閾値。↑で厳格、↓で検出増
     detection_interval_sec: 2.0   # 再検出間隔(秒)。↓で頻繁に再検出(計算増)、↑でKLT主体
