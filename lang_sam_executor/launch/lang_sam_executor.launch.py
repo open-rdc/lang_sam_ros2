@@ -17,7 +17,7 @@ def generate_launch_description():
         name='lang_sam_tracker',
         output='screen',
         remappings=[
-            ('/camera/image_raw', '/zed_node/rgb/image_rect_color')
+            ('/camera/image_raw', '/zed/zed_node/rgb/image_rect_color')
         ],
         parameters=[params_file]
     )
@@ -33,5 +33,5 @@ def generate_launch_description():
 
     return LaunchDescription([
         lang_sam_tracker_node,
-        lang_sam_person_following_node
+        # lang_sam_person_following_node
     ])
