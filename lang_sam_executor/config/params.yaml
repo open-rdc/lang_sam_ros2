@@ -2,11 +2,11 @@ lang_sam_tracker:
   ros__parameters:
     # LangSAM
     sam_model: sam2.1_hiera_small
-    text_prompt: "white line. road."
+    text_prompt: "person."
     box_threshold: 0.3            # 検出(BBox)の信頼度閾値。↑で厳格、↓で検出増(誤検出も増)
     text_threshold: 0.25          # テキスト一致の閾値。↑で厳格、↓で検出増
     detection_interval_sec: 2.0   # 再検出間隔(秒)。↓で頻繁に再検出(計算増)、↑でKLT主体
-
+    image_topic: /zed_node/rgb/image_rect_color  # 画像トピック名
     # KLT (LK Optical Flow)
     klt_win_size: [31, 31]        # 追跡窓(px)。大きいほど頑健/遅い。速い/大きな動き→[21,21]〜[31,31]、小物→[11,11]〜[15,15]
     klt_max_level: 4              # ピラミッド段数。大きい動き対応↑/計算増。2〜4推奨
