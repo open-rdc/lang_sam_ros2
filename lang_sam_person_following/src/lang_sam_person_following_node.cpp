@@ -21,29 +21,26 @@ void FollowPersonNode::tracksCallback(const lang_sam_msgs::msg::TrackArray::Shar
 {
   int img_w = get_parameter("image_width").as_int();
   // int img_h = get_parameter("image_height").as_int();
-  double kp_lin = get_parameter("kp_linear").as_double();
   double kp_ang = get_parameter("kp_angular").as_double();
-  double desired_area = get_parameter("desired_area").as_double();
 
   // BBoxは一つと仮定（先頭のみ使用）
   if (msg->tracks.empty()) return;
   const auto &t = msg->tracks.front();
 
-  // バウンディングボックス中心とサイズ
+  // バウンディングボックス中心（横方向のみ使用）
   double cx = (t.x_min + t.x_max) * 0.5;
-  // double cy = (t.y_min + t.y_max) * 0.5;
-  double area = std::max(0, t.x_max - t.x_min) * std::max(0, t.y_max - t.y_min);
 
   // 画面中心との偏差
   double dx = (cx - img_w * 0.5);
 
-  // 簡易制御: 前進速度はサイズ差、回転は横方向偏差
   geometry_msgs::msg::Twist cmd;
-  cmd.linear.x = kp_lin * (desired_area - area);
+  // 並進速度を常に一定(0.6 m/s)
+  cmd.linear.x = 0.2;
+  // 角速度は横方向偏差に比例
   cmd.angular.z = -kp_ang * dx;
 
-  // 安定化の簡易クリップ
-  if (std::abs(cmd.linear.x) > 0.5) cmd.linear.x = 0.5 * (cmd.linear.x > 0 ? 1 : -1);
+  // クリップ
+  if (std::abs(cmd.linear.x) > 0.6) cmd.linear.x = 0.6 * (cmd.linear.x > 0 ? 1 : -1);
   if (std::abs(cmd.angular.z) > 1.0) cmd.angular.z = 1.0 * (cmd.angular.z > 0 ? 1 : -1);
 
   cmd_pub_->publish(cmd);
